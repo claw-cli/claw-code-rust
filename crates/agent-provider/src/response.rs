@@ -49,23 +49,13 @@ pub enum StreamEvent {
         content: ResponseContent,
     },
     /// Incremental text delta.
-    TextDelta {
-        index: usize,
-        text: String,
-    },
+    TextDelta { index: usize, text: String },
     /// Incremental JSON delta for tool input.
-    InputJsonDelta {
-        index: usize,
-        partial_json: String,
-    },
+    InputJsonDelta { index: usize, partial_json: String },
     /// A content block is complete.
-    ContentBlockStop {
-        index: usize,
-    },
+    ContentBlockStop { index: usize },
     /// The full message is complete.
-    MessageDone {
-        response: ModelResponse,
-    },
+    MessageDone { response: ModelResponse },
     /// Usage update mid-stream.
     UsageDelta(Usage),
 }

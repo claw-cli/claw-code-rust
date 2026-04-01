@@ -50,14 +50,12 @@ impl ToolOrchestrator {
         let mut results = Vec::with_capacity(calls.len());
 
         // Partition into concurrent (read-only) and sequential (mutating)
-        let (concurrent, sequential): (Vec<_>, Vec<_>) = calls
-            .iter()
-            .partition(|call| {
-                self.registry
-                    .get(&call.name)
-                    .map(|t| t.supports_concurrency())
-                    .unwrap_or(false)
-            });
+        let (concurrent, sequential): (Vec<_>, Vec<_>) = calls.iter().partition(|call| {
+            self.registry
+                .get(&call.name)
+                .map(|t| t.supports_concurrency())
+                .unwrap_or(false)
+        });
 
         // Run concurrent tools in parallel
         if !concurrent.is_empty() {

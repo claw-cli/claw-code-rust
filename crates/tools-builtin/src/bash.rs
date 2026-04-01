@@ -2,6 +2,7 @@ use agent_permissions::{PermissionDecision, PermissionRequest, ResourceKind};
 use agent_tools::{Tool, ToolContext, ToolOutput};
 use async_trait::async_trait;
 use serde_json::json;
+use std::process::Stdio;
 use tokio::process::Command;
 use tracing::info;
 
@@ -69,16 +70,21 @@ impl Tool for BashTool {
             }
         }
 
-        info!(command, "executing bash command");
+        let shell = platform_shell();
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
-            Command::new("bash")
-                .arg("-c")
+        info!(command, shell = shell.program, "executing shell command");
+
+        let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), {
+            let mut child = Command::new(shell.program);
+            child
+                .args(shell.args)
                 .arg(command)
-                .current_dir(&ctx.cwd)
-                .output(),
-        )
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .current_dir(&ctx.cwd);
+            child.output()
+        })
         .await;
 
         match result {
@@ -122,5 +128,24 @@ impl Tool for BashTool {
 
     fn is_read_only(&self) -> bool {
         false
+    }
+}
+
+struct ShellSpec {
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+fn platform_shell() -> ShellSpec {
+    if cfg!(windows) {
+        ShellSpec {
+            program: "powershell",
+            args: &["-NoProfile", "-Command"],
+        }
+    } else {
+        ShellSpec {
+            program: "bash",
+            args: &["-lc"],
+        }
     }
 }

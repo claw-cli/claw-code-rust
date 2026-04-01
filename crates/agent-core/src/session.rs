@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use agent_compact::TokenBudget;
+use agent_permissions::PermissionMode;
 
 use crate::Message;
 
@@ -11,6 +12,7 @@ pub struct SessionConfig {
     pub system_prompt: String,
     pub max_turns: usize,
     pub token_budget: TokenBudget,
+    pub permission_mode: PermissionMode,
 }
 
 impl Default for SessionConfig {
@@ -20,6 +22,7 @@ impl Default for SessionConfig {
             system_prompt: String::new(),
             max_turns: 100,
             token_budget: TokenBudget::default(),
+            permission_mode: PermissionMode::AutoApprove,
         }
     }
 }
@@ -56,6 +59,9 @@ impl SessionState {
     }
 
     pub fn to_request_messages(&self) -> Vec<agent_provider::RequestMessage> {
-        self.messages.iter().map(|m| m.to_request_message()).collect()
+        self.messages
+            .iter()
+            .map(|m| m.to_request_message())
+            .collect()
     }
 }

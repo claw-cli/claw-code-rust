@@ -144,9 +144,8 @@ pub async fn query(
         let tool_calls: Vec<ToolCall> = tool_uses
             .into_iter()
             .map(|(id, name, json_str)| {
-                let input = serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Object(
-                    serde_json::Map::new(),
-                ));
+                let input = serde_json::from_str(&json_str)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                 assistant_content.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -173,9 +172,9 @@ pub async fn query(
         // Execute tool calls
         let tool_ctx = ToolContext {
             cwd: session.cwd.clone(),
-            permissions: Arc::new(
-                agent_permissions::RuleBasedPolicy::new(agent_permissions::PermissionMode::AutoApprove),
-            ),
+            permissions: Arc::new(agent_permissions::RuleBasedPolicy::new(
+                session.config.permission_mode,
+            )),
             session_id: session.id.clone(),
         };
 
@@ -208,5 +207,183 @@ pub async fn query(
             debug!("stop_reason=end_turn after tool use, ending");
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use futures::Stream;
+    use serde_json::json;
+
+    use agent_permissions::PermissionMode;
+    use agent_provider::{
+        ModelRequest, ModelResponse, ResponseContent, StopReason, StreamEvent, Usage,
+    };
+    use agent_tools::{Tool, ToolOrchestrator, ToolOutput, ToolRegistry};
+
+    use super::query;
+    use crate::{ContentBlock, Message, SessionConfig, SessionState};
+
+    struct SingleToolUseProvider {
+        requests: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl agent_provider::ModelProvider for SingleToolUseProvider {
+        async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            unreachable!("tests stream responses only")
+        }
+
+        async fn stream(
+            &self,
+            _request: ModelRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+            let request_number = self.requests.fetch_add(1, Ordering::SeqCst);
+
+            let events = if request_number == 0 {
+                vec![
+                    Ok(StreamEvent::ContentBlockStart {
+                        index: 0,
+                        content: ResponseContent::ToolUse {
+                            id: "tool-1".into(),
+                            name: "mutating_tool".into(),
+                            input: json!({ "value": 1 }),
+                        },
+                    }),
+                    Ok(StreamEvent::InputJsonDelta {
+                        index: 0,
+                        partial_json: r#"{"value":1}"#.into(),
+                    }),
+                    Ok(StreamEvent::MessageDone {
+                        response: ModelResponse {
+                            id: "resp-1".into(),
+                            content: vec![ResponseContent::ToolUse {
+                                id: "tool-1".into(),
+                                name: "mutating_tool".into(),
+                                input: json!({ "value": 1 }),
+                            }],
+                            stop_reason: Some(StopReason::ToolUse),
+                            usage: Usage::default(),
+                        },
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(StreamEvent::TextDelta {
+                        index: 0,
+                        text: "done".into(),
+                    }),
+                    Ok(StreamEvent::MessageDone {
+                        response: ModelResponse {
+                            id: "resp-2".into(),
+                            content: vec![ResponseContent::Text("done".into())],
+                            stop_reason: Some(StopReason::EndTurn),
+                            usage: Usage::default(),
+                        },
+                    }),
+                ]
+            };
+
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+
+        fn name(&self) -> &str {
+            "test-provider"
+        }
+    }
+
+    struct MutatingTool;
+
+    #[async_trait]
+    impl Tool for MutatingTool {
+        fn name(&self) -> &str {
+            "mutating_tool"
+        }
+
+        fn description(&self) -> &str {
+            "A test-only mutating tool."
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "integer" }
+                },
+                "required": ["value"]
+            })
+        }
+
+        async fn execute(
+            &self,
+            _ctx: &agent_tools::ToolContext,
+            _input: serde_json::Value,
+        ) -> Result<ToolOutput> {
+            Ok(ToolOutput::success("ok"))
+        }
+    }
+
+    #[tokio::test]
+    async fn query_uses_session_permission_mode_for_mutating_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(MutatingTool));
+        let registry = Arc::new(registry);
+        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+
+        let mut session = SessionState::new(
+            SessionConfig {
+                permission_mode: PermissionMode::Deny,
+                ..Default::default()
+            },
+            std::env::temp_dir(),
+        );
+        session.push_message(Message::user("run the tool"));
+
+        query(
+            &mut session,
+            &SingleToolUseProvider {
+                requests: AtomicUsize::new(0),
+            },
+            registry,
+            &orchestrator,
+            None,
+        )
+        .await
+        .expect("query should complete and append a tool_result");
+
+        let tool_result_message = session
+            .messages
+            .iter()
+            .find(|message| {
+                message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+            })
+            .expect("tool_result message should be appended");
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } = &tool_result_message.content[0]
+        else {
+            panic!("expected tool_result content block");
+        };
+
+        assert_eq!(tool_use_id, "tool-1");
+        assert!(
+            *is_error,
+            "denied permission should surface as a tool error"
+        );
+        assert!(
+            content.contains("permission denied"),
+            "expected tool_result to mention permission denial, got: {content}"
+        );
     }
 }

@@ -18,8 +18,12 @@ struct Cli {
     model: String,
 
     /// System prompt
-    #[arg(short, long, default_value = "You are a helpful coding assistant. \
-        Use tools when appropriate to help the user. Be concise.")]
+    #[arg(
+        short,
+        long,
+        default_value = "You are a helpful coding assistant. \
+        Use tools when appropriate to help the user. Be concise."
+    )]
     system: String,
 
     /// Permission mode: auto, interactive, deny
@@ -51,17 +55,16 @@ async fn main() -> Result<()> {
         model: cli.model.clone(),
         system_prompt: cli.system.clone(),
         max_turns: cli.max_turns,
+        permission_mode: match cli.permission.as_str() {
+            "auto" => PermissionMode::AutoApprove,
+            "interactive" => PermissionMode::Interactive,
+            "deny" => PermissionMode::Deny,
+            other => {
+                eprintln!("unknown permission mode '{}', using auto", other);
+                PermissionMode::AutoApprove
+            }
+        },
         ..Default::default()
-    };
-
-    let _perm_mode = match cli.permission.as_str() {
-        "auto" => PermissionMode::AutoApprove,
-        "interactive" => PermissionMode::Interactive,
-        "deny" => PermissionMode::Deny,
-        other => {
-            eprintln!("unknown permission mode '{}', using auto", other);
-            PermissionMode::AutoApprove
-        }
     };
 
     // Register tools
@@ -109,10 +112,7 @@ async fn main() -> Result<()> {
             input_tokens,
             output_tokens,
         } => {
-            eprintln!(
-                "  [tokens: {} in / {} out]",
-                input_tokens, output_tokens
-            );
+            eprintln!("  [tokens: {} in / {} out]", input_tokens, output_tokens);
         }
     });
 
@@ -195,11 +195,11 @@ fn byte_summary(s: &str) -> String {
 // Stub provider — fallback when no API key is configured
 // ---------------------------------------------------------------------------
 
-use std::pin::Pin;
-use futures::Stream;
 use agent_provider::{
     ModelRequest, ModelResponse, ResponseContent, StopReason, StreamEvent, Usage,
 };
+use futures::Stream;
+use std::pin::Pin;
 
 struct StubProvider;
 

@@ -32,7 +32,10 @@ impl TaskManager {
     pub async fn update_state(&self, task_id: &str, state: TaskState) {
         if let Some(info) = self.tasks.write().await.get_mut(task_id) {
             info.state = state;
-            if matches!(state, TaskState::Completed | TaskState::Failed | TaskState::Cancelled) {
+            if matches!(
+                state,
+                TaskState::Completed | TaskState::Failed | TaskState::Cancelled
+            ) {
                 info.finished_at = Some(chrono::Utc::now());
             }
         }

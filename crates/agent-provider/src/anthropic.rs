@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use tracing::{debug, warn};
 
-use crate::{ModelProvider, ModelRequest, ModelResponse, ResponseContent, StopReason, StreamEvent, Usage};
+use crate::{
+    ModelProvider, ModelRequest, ModelResponse, ResponseContent, StopReason, StreamEvent, Usage,
+};
 
 pub struct AnthropicProvider {
     api_key: String,
@@ -232,7 +234,9 @@ fn handle_sse_event(
             };
 
             while state.content_blocks.len() <= index {
-                state.content_blocks.push(ResponseContent::Text(String::new()));
+                state
+                    .content_blocks
+                    .push(ResponseContent::Text(String::new()));
             }
             state.content_blocks[index] = content.clone();
             out.push(Ok(StreamEvent::ContentBlockStart { index, content }));
@@ -246,7 +250,9 @@ fn handle_sse_event(
             match dtype {
                 "text_delta" => {
                     let text = delta["text"].as_str().unwrap_or("").to_string();
-                    if let Some(ResponseContent::Text(ref mut t)) = state.content_blocks.get_mut(index) {
+                    if let Some(ResponseContent::Text(ref mut t)) =
+                        state.content_blocks.get_mut(index)
+                    {
                         t.push_str(&text);
                     }
                     out.push(Ok(StreamEvent::TextDelta { index, text }));
@@ -362,9 +368,7 @@ fn parse_complete_response(raw: &serde_json::Value) -> anyhow::Result<ModelRespo
         }
     }
 
-    let stop_reason = raw["stop_reason"]
-        .as_str()
-        .map(parse_stop_reason);
+    let stop_reason = raw["stop_reason"].as_str().map(parse_stop_reason);
 
     let usage = Usage {
         input_tokens: raw["usage"]["input_tokens"].as_u64().unwrap_or(0) as usize,
