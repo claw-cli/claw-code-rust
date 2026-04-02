@@ -1,205 +1,231 @@
-# 核心运行时（Query Runtime）— 能力对齐分析
+# Core Runtime (Query Runtime) — Capability Alignment Analysis
 
-> 基于 `goal.md` 第一章 12 个能力点，逐一与 `crates/core/src/` 实际代码对比，并按重要性排序。
-
----
-
-## 一、优先级排序
-
-### P0 — 最关键（影响基本可用性）
-
-| 优先级 | # | 能力点 | 为什么最优先 |
-|--------|-----|--------|------------|
-| 1 | 1.10 | **中断与恢复** | Ctrl+C 直接杀进程，用户无法安全中断生成，误操作即丢失整个会话 |
-| 2 | 1.5 | **ContextTooLong 恢复** | 长对话必然触发上下文超限，无恢复 = 崩溃丢失全部上下文 |
-| 3 | 1.3 | **自动 Compact** | 1.5 的主动防线——在超限前就压缩历史，骨架已有，接入成本相对低 |
-| 4 | 1.6 | **MaxOutputTokens 恢复** | 输出截断意味着代码写一半、思路断一半，实现简单（追加 "请继续"） |
-
-### P1 — 重要（影响生产力与成本）
-
-| 优先级 | # | 能力点 | 为什么重要 |
-|--------|-----|--------|----------|
-| 5 | 1.7 | **Token Budget 控制** | 成本控制的基础，决定何时/如何压缩。没有它 autoCompact 无法正确触发 |
-| 6 | 1.4 | **Micro Compact** | 单条 tool_result（如 grep 几千行）吃掉大量上下文窗口，局部压缩显著提升利用率 |
-| 7 | 1.9 | **Memory Prefetch** | CLAUDE.md 加载是项目级上下文的基础，影响模型理解深度和首轮回答质量 |
-| 8 | 1.11 | **Usage 统计** | 用户需要知道消耗 / 费用，也是优化 prompt caching 策略的前提 |
-
-### P2 — 有价值但可延后
-
-| 优先级 | # | 能力点 | 说明 |
-|--------|-----|--------|------|
-| 9 | 1.8 | **Stop Hooks** | 扩展性需求（自动提交、自动测试等），核心流程不依赖 |
-
-### 已实现（无需排期）
-
-| # | 能力点 |
-|-----|--------|
-| 1.1 | 多轮对话主循环 |
-| 1.2 | 流式输出 |
-| 1.12 | 多 Provider 流式协议统一 |
+> Based on the 12 capabilities in Chapter 1 of `goal.md`, compared one by one with the actual code in `crates/core/src/`, and prioritized by importance.
 
 ---
 
-## 二、代码对齐检查
+## 1. Priority Ranking
 
-逐项对比 `goal.md` 描述与实际源码，检查是否准确。
+### P0 — Most Critical (affects basic usability)
 
-### 1.1 多轮对话主循环 ✅ 一致
+| Priority | #    | Capability                   | Why it is top priority                                                                                                            |
+| -------- | ---- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 1        | 1.10 | **Interrupt & Resume**       | Ctrl+C kills the process directly; users cannot safely interrupt generation, and accidental interruption loses the entire session |
+| 2        | 1.5  | **ContextTooLong Recovery**  | Long conversations will inevitably exceed context limits; without recovery = crash and total context loss                         |
+| 3        | 1.3  | **Auto Compact**             | Preventive defense for 1.5 — compress history before overflow; skeleton already exists, relatively low integration cost           |
+| 4        | 1.6  | **MaxOutputTokens Recovery** | Truncated output means incomplete code/thoughts; simple fix (append “please continue”)                                            |
 
-- **goal.md**: 已实现
-- **代码**: `query.rs` 有完整的 `loop`，流程为 build request → stream → collect tool_use → execute → append tool_result → 循环
+---
+
+### P1 — Important (affects productivity & cost)
+
+| Priority | #    | Capability               | Why it matters                                                                                                               |
+| -------- | ---- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| 5        | 1.7  | **Token Budget Control** | Foundation for cost control; determines when/how to compact. Without it, autoCompact cannot trigger correctly                |
+| 6        | 1.4  | **Micro Compact**        | A single tool_result (e.g., large grep output) can consume huge context; local compression improves efficiency significantly |
+| 7        | 1.9  | **Memory Prefetch**      | Loading CLAUDE.md provides project-level context, improving model understanding and first response quality                   |
+| 8        | 1.11 | **Usage Tracking**       | Users need visibility into usage/cost; also required for optimizing prompt caching                                           |
+
+---
+
+### P2 — Valuable but can be deferred
+
+| Priority | #   | Capability     | Notes                                                                            |
+| -------- | --- | -------------- | -------------------------------------------------------------------------------- |
+| 9        | 1.8 | **Stop Hooks** | Extensibility feature (auto-commit, auto-test, etc.), not required for core flow |
+
+---
+
+### Already Implemented (no scheduling needed)
+
+| #    | Capability                       |
+| ---- | -------------------------------- |
+| 1.1  | Multi-turn loop                  |
+| 1.2  | Streaming output                 |
+| 1.12 | Unified multi-provider streaming |
+
+---
+
+## 2. Code Alignment Check
+
+Compare `goal.md` with actual implementation for accuracy.
+
+---
+
+### 1.1 Multi-turn loop ✅ Matches
+
+* **goal.md**: Implemented
+* **Code**: `query.rs` contains full loop: build request → stream → collect tool_use → execute → append tool_result → repeat
+
+---
+
+### 1.2 Streaming output ✅ Matches
+
+* **goal.md**: Implemented
+* **Code**: Handles `StreamEvent::TextDelta`, emits `QueryEvent::TextDelta`, printed incrementally in `main.rs`
+
+---
+
+### 1.3 Auto Compact ✅ Matches
+
+* **goal.md**: Exists but not integrated
+* **Code**:
+
+  * `TruncateStrategy` implemented
+  * `TokenBudget` supports `should_compact()`
+  * `SessionConfig` includes `token_budget`
+  * **BUT**: `query.rs` never calls compact logic
+
+---
+
+### 1.4 Micro Compact ✅ Matches
+
+* **goal.md**: Missing
+* **Code**: No implementation anywhere
+
+---
+
+### 1.5 ContextTooLong Recovery ✅ Matches
+
+* **goal.md**: Error type exists, no recovery
+* **Code**:
+
+  * `AgentError::ContextTooLong` exists
+  * No retry or special handling in `query.rs`
+
+---
+
+### 1.6 MaxOutputTokens Recovery ✅ Matches
+
+* **goal.md**: Missing
+* **Code**:
+
+  * `StopReason::MaxTokens` defined
+  * Not checked in query loop
+
+---
+
+### 1.7 Token Budget Control ✅ Matches
+
+* **goal.md**: Exists but unused
+* **Code**:
+
+  * Full budget logic implemented
+  * Only `max_output_tokens` used
+  * `should_compact()` never used
+
+---
+
+### 1.8 Stop Hooks ✅ Matches
+
+* **goal.md**: Missing
+* **Code**: No hook system
+
+---
+
+### 1.9 Memory Prefetch ✅ Matches
+
+* **goal.md**: Missing
+* **Code**: Only static system prompt, no CLAUDE.md loading
+
+---
+
+### 1.10 Interrupt & Resume ✅ Matches
+
+* **goal.md**: Missing
+* **Code**:
+
+  * No Ctrl+C handler
+  * `AgentError::Aborted` unused
+  * Process exits directly
+
+---
+
+### 1.11 Usage Tracking ⚠️ Mostly correct
+
+* **goal.md**: Partial, no cache stats
+* **Code**:
+
+  * Token counters exist
+  * Cache fields exist but unused
+
+**More accurate description**: cache fields are defined but not used/read/displayed
+
+---
+
+### 1.12 Unified streaming protocol ✅ Matches
+
+* **goal.md**: Implemented
+* **Code**: Unified `StreamEvent` across providers
+
+---
+
+## 3. Additional Findings (not in goal.md)
+
+---
+
+### 3.1 PermissionPolicy recreated every loop
+
+Each loop creates a new policy instance:
 
 ```rust
-// crates/core/src/query.rs — 主循环骨架
-loop {
-    // ... build ModelRequest ...
-    // ... stream response, collect tool_uses ...
-    if tool_calls.is_empty() {
-        return Ok(());
-    }
-    // ... execute tools, append results ...
-    // loop back
-}
+permissions: Arc::new(RuleBasedPolicy::new(...))
 ```
 
-### 1.2 流式输出 ✅ 一致
-
-- **goal.md**: 已实现
-- **代码**: `query.rs` 处理 `StreamEvent::TextDelta` 并 emit `QueryEvent::TextDelta`；`main.rs` 中 `handle_event_text` 逐 delta `print!` 到 stdout
-
-### 1.3 自动 Compact ✅ 一致
-
-- **goal.md**: compact crate 有骨架，未接入主循环
-- **代码**:
-  - `compact/src/strategy.rs` — `TruncateStrategy` 实现了 `CompactStrategy` trait
-  - `compact/src/budget.rs` — `TokenBudget` 有 `should_compact()` 和 `input_budget()`
-  - `core/src/session.rs` — `SessionConfig` 持有 `token_budget: TokenBudget`
-  - **但** `query.rs` **零引用** compact crate，从未调用 `should_compact()`
-
-### 1.4 Micro Compact ✅ 一致
-
-- **goal.md**: 无
-- **代码**: 全代码库无任何单条 tool_result 局部压缩逻辑
-
-### 1.5 ContextTooLong 恢复 ✅ 一致
-
-- **goal.md**: 错误类型存在，无恢复逻辑
-- **代码**:
-  - `error.rs` 定义了 `AgentError::ContextTooLong`
-  - `query.rs` 中 stream 错误统一走 `return Err(AgentError::Provider(e))`，无模式匹配 context_too_long、无重试
-
-### 1.6 MaxOutputTokens 恢复 ✅ 一致
-
-- **goal.md**: 无
-- **代码**:
-  - `StopReason::MaxTokens` 枚举已定义（`response.rs`）
-  - `query.rs` 在无 tool_call 时直接 `return Ok(())`，**未检查** stop_reason 是否为 MaxTokens
-
-### 1.7 Token Budget 控制 ✅ 一致
-
-- **goal.md**: 字段存在，未生效
-- **代码**:
-  - `TokenBudget` 有完整逻辑：`input_budget()`、`should_compact()`、`compact_threshold`
-  - `query.rs` 仅使用 `session.config.token_budget.max_output_tokens` 填充请求
-  - `should_compact()` 和 `input_budget()` **从未在 query 循环中被调用**
-
-### 1.8 Stop Hooks ✅ 一致
-
-- **goal.md**: 无
-- **代码**: 无 hook 注册/执行机制，循环退出仅看 `tool_calls.is_empty()` 和 `max_turns`
-
-### 1.9 Memory Prefetch ✅ 一致
-
-- **goal.md**: 无
-- **代码**: system prompt 来自 CLI `--system` 参数的静态字符串，无 CLAUDE.md 文件加载逻辑
-
-### 1.10 中断与恢复 ✅ 一致
-
-- **goal.md**: 无（Ctrl+C 直接退出进程）
-- **代码**:
-  - `main.rs` 无 `ctrlc` / `tokio::signal` 处理
-  - `AgentError::Aborted` 已定义但**从未被触发**
-  - Ctrl+C 确实直接杀进程
-
-### 1.11 Usage 统计 ⚠️ 基本一致，可更精确
-
-- **goal.md**: 部分有（累计 token），无 cache 统计
-- **代码**:
-  - `SessionState` 有 `total_input_tokens` / `total_output_tokens`，在 `MessageDone` 时累加
-  - `Usage` struct **已定义** `cache_creation_input_tokens` 和 `cache_read_input_tokens` 字段（`Option<usize>`）
-  - 但 `query.rs` 累加逻辑**忽略**了这两个字段，从未读取/展示
-- **建议修正**: "cache 字段已定义但未读取/累加/展示"（比"无 cache 统计"更准确）
-
-### 1.12 多 Provider 流式协议统一 ✅ 一致
-
-- **goal.md**: 已实现
-- **代码**: `ModelProvider` trait + `StreamEvent` 统一枚举，`anthropic.rs` 和 `openai_compat.rs` 各自实现映射
+This prevents persistent permission state (e.g., Allow Once / Always Allow).
+Should instead be stored at session level.
 
 ---
 
-## 三、额外发现（goal.md 未提及）
+### 3.2 No error classification in streaming
 
-### 3.1 每轮重建 PermissionPolicy
-
-`query.rs:173-178` 每次循环都 `new` 一个新的 `RuleBasedPolicy`：
+All errors are treated the same:
 
 ```rust
-let tool_ctx = ToolContext {
-    cwd: session.cwd.clone(),
-    permissions: Arc::new(claw_permissions::RuleBasedPolicy::new(
-        session.config.permission_mode,
-    )),
-    session_id: session.id.clone(),
-};
+return Err(AgentError::Provider(e));
 ```
 
-这意味着即使未来实现 "Allow Once"（3.4）或 "Always Allow"（3.5），策略状态也会在每轮被丢弃。应改为 session 级别持有单一 Policy 实例。
+Missing distinctions:
 
-### 3.2 Stream 错误无分类处理
+* **429** → retry with backoff
+* **5xx** → retry
+* **context_too_long** → trigger compact
 
-`query.rs:128-131` 对所有 stream 错误统一 `return Err`：
+This is a prerequisite for:
 
-```rust
-Err(e) => {
-    warn!(error = %e, "stream error");
-    return Err(AgentError::Provider(e));
-}
-```
-
-没有区分：
-- **429** — 限流，应退避重试（对应 10.3 请求重试）
-- **5xx** — 服务端错误，应重试
-- **context_too_long** — 应触发 reactiveCompact（对应 1.5）
-
-这是 1.5（ContextTooLong 恢复）和 10.3（请求重试）两个能力点的**共同前提**。
+* 1.5 Context recovery
+* 10.3 Retry logic
 
 ---
 
-## 四、建议实施路径
+## 4. Suggested Implementation Roadmap
 
 ```
-Phase 1: 对话生存保障
-  1.10 中断与恢复  ──→  1.5 ContextTooLong 恢复  ──→  1.3 自动 Compact
-       │                       │
-       │                       └── 前提: stream 错误分类（额外发现 3.2）
-       └── 前提: tokio::signal + CancellationToken
+Phase 1: Conversation survival
+  1.10 Interrupt & Resume → 1.5 ContextTooLong Recovery → 1.3 Auto Compact
+       │                           │
+       │                           └── requires error classification (3.2)
+       └── requires signal handling + cancellation
 
-Phase 2: 输出完整性
-  1.6 MaxOutputTokens 恢复（独立，仅需检查 StopReason）
+Phase 2: Output completeness
+  1.6 MaxOutputTokens Recovery
 
-Phase 3: 成本与质量
-  1.7 Token Budget 控制  ──→  1.4 Micro Compact
+Phase 3: Cost & efficiency
+  1.7 Token Budget → 1.4 Micro Compact
        │
-       └── 前提: 1.3 已接入
+       └── requires Auto Compact
 
-Phase 4: 上下文质量
-  1.9 Memory Prefetch  ──→  1.11 Usage 统计完善
+Phase 4: Context quality
+  1.9 Memory Prefetch → 1.11 Usage tracking improvements
 
-Phase 5: 扩展性
+Phase 5: Extensibility
   1.8 Stop Hooks
 ```
 
-关键依赖：
-- **1.3 依赖 1.7** — 没有 budget 计算，compact 触发时机是盲的
-- **1.5 依赖 3.2（错误分类）** — 必须先能识别 context_too_long 错误
-- **1.4 依赖 1.3** — micro compact 是 auto compact 的细粒度补充
+---
+
+### Key Dependencies
+
+* **1.3 depends on 1.7** — without budget, compact timing is blind
+* **1.5 depends on error classification (3.2)**
+* **1.4 depends on 1.3** — micro compact builds on auto compact
