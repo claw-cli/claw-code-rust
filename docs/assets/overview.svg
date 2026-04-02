@@ -2,27 +2,27 @@
   <rect width="960" height="300" rx="24" fill="#F8FAFC"/>
   <rect x="40" y="52" width="360" height="196" rx="20" fill="#111827"/>
   <text x="70" y="92" fill="#FFFFFF" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700">Claude Code</text>
-  <text x="70" y="126" fill="#9CA3AF" font-family="Inter, Arial, sans-serif" font-size="18">Product-shaped codebase</text>
+  <text x="70" y="126" fill="#9CA3AF" font-family="Inter, Arial, sans-serif" font-size="18">Typescript codebase</text>
   <rect x="70" y="152" width="120" height="34" rx="10" fill="#1F2937"/>
-  <text x="95" y="174" fill="#E5E7EB" font-family="Inter, Arial, sans-serif" font-size="16">UI / Ink</text>
+  <text x="95" y="174" fill="#E5E7EB" font-family="Inter, Arial, sans-serif" font-size="16">UI: React / Ink</text>
   <rect x="204" y="152" width="120" height="34" rx="10" fill="#1F2937"/>
   <text x="225" y="174" fill="#E5E7EB" font-family="Inter, Arial, sans-serif" font-size="16">Runtime</text>
   <rect x="70" y="198" width="120" height="34" rx="10" fill="#1F2937"/>
   <text x="92" y="220" fill="#E5E7EB" font-family="Inter, Arial, sans-serif" font-size="16">Tools</text>
   <rect x="204" y="198" width="120" height="34" rx="10" fill="#1F2937"/>
-  <text x="217" y="220" fill="#E5E7EB" font-family="Inter, Arial, sans-serif" font-size="16">State</text>
+  <text x="217" y="220" fill="#E5E7EB" font-family="Inter, Arial, sans-serif" font-size="16">Memory</text>
   <path d="M446 150H514" stroke="#94A3B8" stroke-width="6" stroke-linecap="round"/>
   <path d="M499 131L528 150L499 169" fill="#94A3B8"/>
-  <text x="430" y="120" fill="#64748B" font-family="Inter, Arial, sans-serif" font-size="16">Extract runtime</text>
+  <text x="430" y="120" fill="#64748B" font-family="Inter, Arial, sans-serif" font-size="16">Rebuild with Rust</text>
   <rect x="560" y="40" width="360" height="220" rx="20" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
-  <text x="590" y="82" fill="#0F172A" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700">Rust Runtime</text>
-  <text x="590" y="116" fill="#475569" font-family="Inter, Arial, sans-serif" font-size="18">Split into reusable crates</text>
+  <text x="590" y="82" fill="#0F172A" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700">ClawCode-Rust</text>
+  <text x="590" y="116" fill="#475569" font-family="Inter, Arial, sans-serif" font-size="18">Modular Design</text>
   <rect x="590" y="144" width="140" height="34" rx="10" fill="#DBEAFE"/>
-  <text x="613" y="166" fill="#1D4ED8" font-family="Inter, Arial, sans-serif" font-size="16">agent-core</text>
+  <text x="613" y="166" fill="#1D4ED8" font-family="Inter, Arial, sans-serif" font-size="16">core</text>
   <rect x="746" y="144" width="140" height="34" rx="10" fill="#DCFCE7"/>
-  <text x="769" y="166" fill="#15803D" font-family="Inter, Arial, sans-serif" font-size="16">agent-tools</text>
+  <text x="769" y="166" fill="#15803D" font-family="Inter, Arial, sans-serif" font-size="16">tools</text>
   <rect x="590" y="190" width="140" height="34" rx="10" fill="#FEE2E2"/>
-  <text x="612" y="212" fill="#B91C1C" font-family="Inter, Arial, sans-serif" font-size="16">agent-tasks</text>
+  <text x="612" y="212" fill="#B91C1C" font-family="Inter, Arial, sans-serif" font-size="16">tasks</text>
   <rect x="746" y="190" width="140" height="34" rx="10" fill="#F3E8FF"/>
-  <text x="761" y="212" fill="#7E22CE" font-family="Inter, Arial, sans-serif" font-size="16">provider / mcp</text>
+  <text x="761" y="212" fill="#7E22CE" font-family="Inter, Arial, sans-serif" font-size="16">skills / mcp</text>
 </svg>
