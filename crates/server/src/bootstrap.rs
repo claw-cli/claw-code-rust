@@ -68,6 +68,7 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
             provider.default_model,
         ),
     );
+    runtime.load_persisted_sessions().await?;
     tracing::info!("server bootstrap completed; starting listeners");
     tokio::select! {
         result = run_listeners(runtime, &config.server.listen) => {

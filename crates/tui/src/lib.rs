@@ -3,6 +3,7 @@
 mod app;
 mod events;
 mod input;
+mod paste_burst;
 mod render;
 mod slash;
 mod terminal;

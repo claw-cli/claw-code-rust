@@ -4,11 +4,13 @@ mod client;
 mod connection;
 mod event;
 mod execution;
+mod persistence;
 mod projection;
 mod protocol;
 mod provider_config;
 mod runtime;
 mod session;
+mod titles;
 mod transport;
 mod turn;
 

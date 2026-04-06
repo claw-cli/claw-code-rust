@@ -2,12 +2,12 @@ use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 
 use tokio::{sync::Mutex, task::JoinHandle};
 
-use clawcr_core::{SessionConfig, SessionId, SessionState};
+use clawcr_core::{SessionConfig, SessionId, SessionRecord, SessionState};
 use clawcr_provider::ModelProvider;
 use clawcr_tools::ToolRegistry;
 
 use crate::{
-    session::SessionSummary,
+    session::{SessionHistoryItem, SessionSummary},
     turn::{SteerInputRecord, TurnSummary},
 };
 
@@ -56,6 +56,8 @@ impl ServerRuntimeDependencies {
 
 /// Mutable per-session runtime state owned by the server.
 pub(crate) struct RuntimeSession {
+    /// Canonical persisted session metadata when the session is durable.
+    pub(crate) record: Option<SessionRecord>,
     /// Transport-facing summary exposed over the API.
     pub(crate) summary: SessionSummary,
     /// Canonical core session state used by the query loop.
@@ -66,6 +68,8 @@ pub(crate) struct RuntimeSession {
     pub(crate) latest_turn: Option<TurnSummary>,
     /// Number of items loaded or appended for the session.
     pub(crate) loaded_item_count: u64,
+    /// Replay-friendly ordered history used by interactive clients during session resume.
+    pub(crate) history_items: Vec<SessionHistoryItem>,
     /// Pending same-turn steering inputs.
     pub(crate) steering_queue: VecDeque<SteerInputRecord>,
     /// Live query task for the active turn.

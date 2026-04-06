@@ -200,6 +200,8 @@ pub struct RequestUserInputPayload {
 pub enum ServerEvent {
     /// A session was started or introduced.
     SessionStarted(SessionEventPayload),
+    /// A session title changed.
+    SessionTitleUpdated(SessionEventPayload),
     /// A session status changed.
     SessionStatusChanged(SessionStatusChangedPayload),
     /// A session was archived.

@@ -6,13 +6,15 @@ use tokio::{
     task::{JoinError, JoinHandle},
 };
 
-use clawcr_core::TurnStatus;
+use clawcr_core::{SessionId, TurnId, TurnStatus};
 use clawcr_server::{
-    InputItem, ItemEnvelope, ItemEventPayload, ItemKind, ServerEvent, SessionStartParams,
-    StdioServerClient, StdioServerClientConfig, TurnEventPayload, TurnStartParams,
+    InputItem, ItemEnvelope, ItemEventPayload, ItemKind, ServerEvent, SessionHistoryItem,
+    SessionHistoryItemKind, SessionListParams, SessionResumeParams, SessionStartParams,
+    SessionTitleUpdateParams, StdioServerClient, StdioServerClientConfig, TurnEventPayload,
+    TurnInterruptParams, TurnStartParams,
 };
 
-use crate::events::WorkerEvent;
+use crate::events::{SessionListEntry, TranscriptItem, TranscriptItemKind, WorkerEvent};
 
 /// Immutable runtime configuration used to construct the background server client worker.
 pub(crate) struct QueryWorkerConfig {
@@ -30,6 +32,16 @@ enum WorkerCommand {
     SubmitPrompt(String),
     /// Update the model used for future turns.
     SetModel(String),
+    /// Request a session list from the server.
+    ListSessions,
+    /// Clear the active session so the next prompt starts a fresh one lazily.
+    StartNewSession,
+    /// Switch the active session to a persisted session identifier.
+    SwitchSession(SessionId),
+    /// Rename the current active session.
+    RenameSession(String),
+    /// Interrupt the active turn when one is running.
+    InterruptTurn,
     /// Stop the worker loop.
     Shutdown,
 }
@@ -71,6 +83,41 @@ impl QueryWorkerHandle {
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
+    /// Requests the current persisted session list from the background worker.
+    pub(crate) fn list_sessions(&self) -> Result<()> {
+        self.command_tx
+            .send(WorkerCommand::ListSessions)
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    /// Clears the active session so the next submitted prompt starts a fresh one lazily.
+    pub(crate) fn start_new_session(&self) -> Result<()> {
+        self.command_tx
+            .send(WorkerCommand::StartNewSession)
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    /// Switches the active session to a persisted session identifier.
+    pub(crate) fn switch_session(&self, session_id: SessionId) -> Result<()> {
+        self.command_tx
+            .send(WorkerCommand::SwitchSession(session_id))
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    /// Renames the current active session.
+    pub(crate) fn rename_session(&self, title: String) -> Result<()> {
+        self.command_tx
+            .send(WorkerCommand::RenameSession(title))
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    /// Interrupts the active turn when one exists.
+    pub(crate) fn interrupt_turn(&self) -> Result<()> {
+        self.command_tx
+            .send(WorkerCommand::InterruptTurn)
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
     /// Stops the worker task and waits for it to finish.
     pub(crate) async fn shutdown(self) -> Result<()> {
         let _ = self.command_tx.send(WorkerCommand::Shutdown);
@@ -83,12 +130,12 @@ impl QueryWorkerHandle {
 impl QueryWorkerHandle {
     /// Creates a lightweight stub worker handle for unit tests that exercise UI logic only.
     pub(crate) fn stub() -> Self {
-        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
         let (_event_tx, event_rx) = mpsc::unbounded_channel();
         Self {
             command_tx,
             event_rx,
-            join_handle: tokio::spawn(async {}),
+            join_handle: tokio::spawn(async move { while command_rx.recv().await.is_some() {} }),
         }
     }
 }
@@ -120,17 +167,9 @@ async fn run_worker_inner(
     })
     .await?;
     let _ = client.initialize().await?;
-    let session = client
-        .session_start(SessionStartParams {
-            cwd: config.cwd.clone(),
-            ephemeral: false,
-            title: None,
-            model: Some(config.model.clone()),
-        })
-        .await?;
-
-    let session_id = session.session_id;
+    let mut session_id: Option<SessionId> = None;
     let mut model = config.model;
+    let mut active_turn_id: Option<TurnId> = None;
     let mut turn_count = 0usize;
     let total_input_tokens = 0usize;
     let total_output_tokens = 0usize;
@@ -140,25 +179,158 @@ async fn run_worker_inner(
             maybe_command = command_rx.recv() => {
                 match maybe_command {
                     Some(WorkerCommand::SubmitPrompt(prompt)) => {
+                        let active_session_id = ensure_session_started(
+                            &mut client,
+                            &config.cwd,
+                            &model,
+                            &mut session_id,
+                        ).await?;
                         let start_result = client.turn_start(TurnStartParams {
-                            session_id,
+                            session_id: active_session_id,
                             input: vec![InputItem::Text { text: prompt }],
                             model: Some(model.clone()),
                             sandbox: None,
                             approval_policy: None,
                             cwd: None,
                         }).await;
-                        if let Err(error) = start_result {
-                            let _ = event_tx.send(WorkerEvent::TurnFailed {
-                                message: error.to_string(),
-                                turn_count,
-                                total_input_tokens,
-                                total_output_tokens,
-                            });
+                        match start_result {
+                            Ok(result) => {
+                                active_turn_id = Some(result.turn_id);
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                });
+                            }
                         }
                     }
                     Some(WorkerCommand::SetModel(next_model)) => {
                         model = next_model;
+                    }
+                    Some(WorkerCommand::ListSessions) => {
+                        match client.session_list(SessionListParams::default()).await {
+                            Ok(result) => {
+                                let sessions = result
+                                    .sessions
+                                    .iter()
+                                    .map(|session| SessionListEntry {
+                                        session_id: session.session_id,
+                                        title: session
+                                            .title
+                                            .clone()
+                                            .unwrap_or_else(|| "(untitled)".to_string()),
+                                        updated_at: session
+                                            .updated_at
+                                            .format("%Y-%m-%d %H:%M:%S UTC")
+                                            .to_string(),
+                                        is_active: Some(session.session_id) == session_id,
+                                    })
+                                    .collect();
+                                let _ = event_tx.send(WorkerEvent::SessionsListed { sessions });
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                });
+                            }
+                        }
+                    }
+                    Some(WorkerCommand::StartNewSession) => {
+                        active_turn_id = None;
+                        session_id = None;
+                        let _ = event_tx.send(WorkerEvent::NewSessionPrepared);
+                    }
+                    Some(WorkerCommand::SwitchSession(next_session_id)) => {
+                        match client
+                            .session_resume(SessionResumeParams {
+                                session_id: next_session_id,
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                active_turn_id = None;
+                                session_id = Some(next_session_id);
+                                if let Some(next_model) = result.session.resolved_model.clone() {
+                                    model = next_model;
+                                }
+                                let _ = event_tx.send(WorkerEvent::SessionSwitched {
+                                    session_id: next_session_id.to_string(),
+                                    title: result.session.title,
+                                    model: result.session.resolved_model,
+                                    history_items: project_history_items(&result.history_items),
+                                    loaded_item_count: result.loaded_item_count,
+                                });
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                });
+                            }
+                        }
+                    }
+                    Some(WorkerCommand::RenameSession(title)) => {
+                        let Some(active_session_id) = session_id else {
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: "no active session exists yet; send a prompt or switch to a saved session first".to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                            });
+                            continue;
+                        };
+                        match client
+                            .session_title_update(SessionTitleUpdateParams {
+                                session_id: active_session_id,
+                                title: title.clone(),
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                let _ = event_tx.send(WorkerEvent::SessionRenamed {
+                                    session_id: active_session_id.to_string(),
+                                    title: result
+                                        .session
+                                        .title
+                                        .unwrap_or(title),
+                                });
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                });
+                            }
+                        }
+                    }
+                    Some(WorkerCommand::InterruptTurn) => {
+                        if let (Some(turn_id), Some(active_session_id)) = (active_turn_id, session_id) {
+                            if let Err(error) = client
+                                .turn_interrupt(TurnInterruptParams {
+                                    session_id: active_session_id,
+                                    turn_id,
+                                    reason: Some("user requested interrupt".to_string()),
+                                })
+                                .await
+                            {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                });
+                            }
+                        }
                     }
                     Some(WorkerCommand::Shutdown) | None => {
                         client.shutdown().await?;
@@ -171,6 +343,9 @@ async fn run_worker_inner(
                     Some((method, event)) => {
                         match method.as_str() {
                             "turn/started" => {
+                                if let ServerEvent::TurnStarted(payload) = event {
+                                    active_turn_id = Some(payload.turn.turn_id);
+                                }
                                 let _ = event_tx.send(WorkerEvent::TurnStarted);
                             }
                             "item/agentMessage/delta" => {
@@ -185,6 +360,7 @@ async fn run_worker_inner(
                             }
                             "turn/completed" => {
                                 if let ServerEvent::TurnCompleted(payload) = event {
+                                    active_turn_id = None;
                                     let completed = payload.turn.status == TurnStatus::Completed
                                         || payload.turn.status == TurnStatus::Interrupted;
                                     if completed {
@@ -200,12 +376,23 @@ async fn run_worker_inner(
                             }
                             "turn/failed" => {
                                 if let ServerEvent::TurnFailed(TurnEventPayload { turn, .. }) = event {
+                                    active_turn_id = None;
                                     let _ = event_tx.send(WorkerEvent::TurnFailed {
                                         message: format!("turn failed with status {:?}", turn.status),
                                         turn_count,
                                         total_input_tokens,
                                         total_output_tokens,
                                     });
+                                }
+                            }
+                            "session/title/updated" => {
+                                if let ServerEvent::SessionTitleUpdated(payload) = event {
+                                    if let Some(title) = payload.session.title {
+                                        let _ = event_tx.send(WorkerEvent::SessionTitleUpdated {
+                                            session_id: payload.session.session_id.to_string(),
+                                            title,
+                                        });
+                                    }
                                 }
                             }
                             _ => {}
@@ -218,6 +405,28 @@ async fn run_worker_inner(
     }
 
     Ok(())
+}
+
+async fn ensure_session_started(
+    client: &mut StdioServerClient,
+    cwd: &PathBuf,
+    model: &str,
+    session_id: &mut Option<SessionId>,
+) -> Result<SessionId> {
+    if let Some(session_id) = session_id {
+        return Ok(*session_id);
+    }
+
+    let session = client
+        .session_start(SessionStartParams {
+            cwd: cwd.clone(),
+            ephemeral: false,
+            title: None,
+            model: Some(model.to_string()),
+        })
+        .await?;
+    *session_id = Some(session.session_id);
+    Ok(session.session_id)
 }
 
 fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSender<WorkerEvent>) {
@@ -259,6 +468,22 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
     }
 }
 
+fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
+    items
+        .iter()
+        .map(|item| {
+            let kind = match item.kind {
+                SessionHistoryItemKind::User => TranscriptItemKind::User,
+                SessionHistoryItemKind::Assistant => TranscriptItemKind::Assistant,
+                SessionHistoryItemKind::ToolCall => TranscriptItemKind::ToolCall,
+                SessionHistoryItemKind::ToolResult => TranscriptItemKind::ToolResult,
+                SessionHistoryItemKind::Error => TranscriptItemKind::Error,
+            };
+            TranscriptItem::new(kind, item.title.clone(), item.body.clone())
+        })
+        .collect()
+}
+
 fn summarize_tool_call(payload: &serde_json::Value) -> String {
     let tool_name = payload
         .get("tool_name")
@@ -297,6 +522,8 @@ fn render_json_value_text(value: &serde_json::Value) -> String {
 fn truncate_tool_output(content: &str) -> String {
     const MAX_LINES: usize = 8;
     const MAX_CHARS: usize = 1200;
+    let content = normalize_display_output(content);
+    let content = content.as_str();
 
     let mut lines = Vec::new();
     let mut chars = 0usize;
@@ -319,7 +546,7 @@ fn truncate_tool_output(content: &str) -> String {
         return if preview == content {
             preview
         } else {
-            format!("{preview}\n… output truncated")
+            format!("{preview}\n… ")
         };
     }
 
@@ -327,10 +554,18 @@ fn truncate_tool_output(content: &str) -> String {
     if preview == content {
         preview
     } else if preview.is_empty() {
-        "… output truncated".to_string()
+        "… ".to_string()
     } else {
-        format!("{preview}\n… output truncated")
+        format!("{preview}\n… ")
     }
+}
+
+fn normalize_display_output(content: &str) -> String {
+    content
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim_matches('\n')
+        .to_string()
 }
 
 fn map_join_error(error: JoinError) -> anyhow::Error {
@@ -345,9 +580,14 @@ fn map_join_error(error: JoinError) -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use pretty_assertions::assert_eq;
 
-    use super::{summarize_tool_call, truncate_tool_output};
+    use clawcr_core::{SessionId, SessionTitleState};
+    use clawcr_server::{SessionRuntimeStatus, SessionSummary};
+
+    use super::{normalize_display_output, summarize_tool_call, truncate_tool_output};
+    use crate::events::SessionListEntry;
 
     #[test]
     fn bash_tool_summary_uses_command_text() {
@@ -373,7 +613,69 @@ mod tests {
 
         assert_eq!(
             truncate_tool_output(&content),
-            "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\n… output truncated"
+            "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\n… "
+        );
+    }
+
+    #[test]
+    fn session_list_entries_keep_title_before_identifier() {
+        let active_session_id = SessionId::new();
+        let summary = SessionSummary {
+            session_id: active_session_id,
+            cwd: ".".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            title: Some("Saved conversation".to_string()),
+            title_state: SessionTitleState::Provisional,
+            ephemeral: false,
+            resolved_model: Some("test-model".to_string()),
+            status: SessionRuntimeStatus::Idle,
+        };
+        let entry = SessionListEntry {
+            session_id: summary.session_id,
+            title: summary.title.clone().unwrap_or_default(),
+            updated_at: summary
+                .updated_at
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string(),
+            is_active: true,
+        };
+
+        assert_eq!(entry.title, "Saved conversation");
+        assert!(entry.updated_at.contains("UTC"));
+    }
+
+    #[test]
+    fn session_list_entries_mark_inactive_sessions() {
+        let summary = SessionSummary {
+            session_id: SessionId::new(),
+            cwd: ".".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            title: Some("Saved conversation".to_string()),
+            title_state: SessionTitleState::Provisional,
+            ephemeral: false,
+            resolved_model: Some("test-model".to_string()),
+            status: SessionRuntimeStatus::Idle,
+        };
+        let entry = SessionListEntry {
+            session_id: summary.session_id,
+            title: summary.title.clone().unwrap_or_default(),
+            updated_at: summary
+                .updated_at
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string(),
+            is_active: false,
+        };
+
+        assert!(!entry.is_active);
+    }
+
+    #[test]
+    fn display_output_normalization_trims_crlf_padding() {
+        assert_eq!(
+            normalize_display_output("\r\n\r\nhello\r\nworld\r\n\r\n"),
+            "hello\nworld"
         );
     }
 }

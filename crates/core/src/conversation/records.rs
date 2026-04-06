@@ -336,7 +336,7 @@ pub struct CompactionSnapshotLine {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RolloutLine {
     /// Session metadata line.
-    SessionMeta(SessionMetaLine),
+    SessionMeta(Box<SessionMetaLine>),
     /// Turn metadata line.
     Turn(TurnLine),
     /// Item record line.
@@ -344,7 +344,7 @@ pub enum RolloutLine {
     /// Session-title update line.
     SessionTitleUpdated(SessionTitleUpdatedLine),
     /// Compaction snapshot line.
-    CompactionSnapshot(CompactionSnapshotLine),
+    CompactionSnapshot(Box<CompactionSnapshotLine>),
 }
 
 #[cfg(test)]

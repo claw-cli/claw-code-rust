@@ -100,47 +100,18 @@ impl InputBuffer {
     }
 
     /// Returns the rendered cursor position for a wrapped text area.
-    pub(crate) fn visual_cursor(&self, inner_width: u16) -> (u16, u16) {
-        if inner_width == 0 {
-            return (0, 0);
-        }
+    pub(crate) fn visual_cursor(&self, full_width: u16) -> (u16, u16) {
+        self.layout(full_width).cursor
+    }
 
-        let width_limit = usize::from(inner_width);
-        let mut x = 0usize;
-        let mut y = 0usize;
-        for ch in self.text.chars().take(self.cursor_chars) {
-            if ch == '\n' {
-                x = 0;
-                y += 1;
-                continue;
-            }
-
-            let width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
-            if x + width > width_limit {
-                x = 0;
-                y += 1;
-            }
-            x += width;
-            if x >= width_limit {
-                x = 0;
-                y += 1;
-            }
-        }
-
-        (x as u16, y as u16)
+    /// Returns the fully wrapped visual lines used by the composer renderer.
+    pub(crate) fn rendered_lines(&self, full_width: u16) -> Vec<String> {
+        self.layout(full_width).lines
     }
 
     /// Returns the number of visual lines needed to render the composer.
-    pub(crate) fn visual_line_count(&self, inner_width: u16) -> u16 {
-        let (_, y) = self.visual_cursor(inner_width);
-        let current_line = self
-            .text
-            .chars()
-            .last()
-            .is_some_and(|last| last == '\n')
-            .then_some(1)
-            .unwrap_or(0);
-        y.saturating_add(1 + current_line)
+    pub(crate) fn visual_line_count(&self, full_width: u16) -> u16 {
+        self.layout(full_width).lines.len() as u16
     }
 
     fn char_len(&self) -> usize {
@@ -154,6 +125,72 @@ impl InputBuffer {
             .map(|(byte_index, _)| byte_index)
             .unwrap_or(self.text.len())
     }
+
+    fn layout(&self, full_width: u16) -> ComposerLayout {
+        let width_limit = usize::from(full_width.max(1));
+        let mut lines = Vec::new();
+        let mut current = String::from("> ");
+        let mut x = 2usize;
+        let mut y = 0usize;
+        let mut chars_seen = 0usize;
+        let mut cursor = (2u16, 0u16);
+
+        if self.cursor_chars == 0 {
+            cursor = (2, 0);
+        }
+
+        for ch in self.text.chars() {
+            if chars_seen == self.cursor_chars {
+                cursor = (x as u16, y as u16);
+            }
+
+            if ch == '\n' {
+                lines.push(std::mem::take(&mut current));
+                current = String::from("  ");
+                x = 2;
+                y += 1;
+                chars_seen += 1;
+                continue;
+            }
+
+            let width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+            if x + width > width_limit && !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                x = 0;
+                y += 1;
+            }
+
+            current.push(ch);
+            x += width;
+            chars_seen += 1;
+
+            if x >= width_limit {
+                lines.push(std::mem::take(&mut current));
+                x = 0;
+                y += 1;
+            }
+        }
+
+        if chars_seen == self.cursor_chars {
+            cursor = (x as u16, y as u16);
+        }
+
+        if current.is_empty() {
+            current = String::new();
+        }
+        lines.push(current);
+
+        ComposerLayout { lines, cursor }
+    }
+}
+
+/// Precomputed wrapped composer content and cursor position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposerLayout {
+    /// Fully wrapped visual lines exactly as the composer renders them.
+    lines: Vec<String>,
+    /// Cursor position within the wrapped visual lines.
+    cursor: (u16, u16),
 }
 
 #[cfg(test)]
@@ -190,8 +227,9 @@ mod tests {
         let mut buffer = InputBuffer::new();
         buffer.insert_str("abcdef");
 
-        assert_eq!(buffer.visual_cursor(4), (2, 1));
-        assert_eq!(buffer.visual_line_count(4), 2);
+        assert_eq!(buffer.rendered_lines(4), vec!["> ab", "cdef", ""]);
+        assert_eq!(buffer.visual_cursor(4), (0, 2));
+        assert_eq!(buffer.visual_line_count(4), 3);
     }
 
     #[test]
@@ -199,8 +237,17 @@ mod tests {
         let mut buffer = InputBuffer::new();
         buffer.insert_str("a\nbc");
 
-        assert_eq!(buffer.visual_cursor(10), (2, 1));
+        assert_eq!(buffer.rendered_lines(10), vec!["> a", "  bc"]);
+        assert_eq!(buffer.visual_cursor(10), (4, 1));
         assert_eq!(buffer.visual_line_count(10), 2);
+    }
+
+    #[test]
+    fn rendered_lines_keep_explicit_multiline_prefixes() {
+        let mut buffer = InputBuffer::new();
+        buffer.insert_str("hello\nworld");
+
+        assert_eq!(buffer.rendered_lines(20), vec!["> hello", "  world"]);
     }
 
     #[test]

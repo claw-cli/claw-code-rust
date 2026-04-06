@@ -12,19 +12,23 @@ use tokio::sync::{mpsc, Mutex};
 
 use clawcr_core::{
     query, ItemId, Message, QueryEvent, SessionId, SessionTitleFinalSource, SessionTitleState,
-    TurnId, TurnStatus,
+    TextItem, ToolCallItem, ToolResultItem, TurnId, TurnItem, TurnStatus, Worklog,
 };
 use clawcr_tools::ToolOrchestrator;
 
 use crate::{
     execution::{RuntimeSession, ServerRuntimeDependencies},
+    persistence::{build_item_record, build_turn_record, RolloutStore},
+    projection::history_item_from_turn_item,
+    titles::{build_title_generation_request, derive_provisional_title, normalize_generated_title},
     ClientTransportKind, ConnectionState, ErrorResponse, EventContext, EventsSubscribeParams,
     EventsSubscribeResult, InitializeParams, InitializeResult, ItemDeltaKind, ItemDeltaPayload,
     ItemEnvelope, ItemEventPayload, ItemKind, NotificationEnvelope, ProtocolError,
     ProtocolErrorCode, ServerCapabilities, ServerEvent, ServerRequestResolvedPayload,
-    SessionEventPayload, SessionForkParams, SessionForkResult, SessionResumeParams,
-    SessionResumeResult, SessionRuntimeStatus, SessionStartParams, SessionStartResult,
-    SessionStatusChangedPayload, SteerInputRecord, SuccessResponse, TurnEventPayload,
+    SessionEventPayload, SessionForkParams, SessionForkResult, SessionListParams,
+    SessionListResult, SessionResumeParams, SessionResumeResult, SessionRuntimeStatus,
+    SessionStartParams, SessionStartResult, SessionStatusChangedPayload, SessionTitleUpdateParams,
+    SessionTitleUpdateResult, SteerInputRecord, SuccessResponse, TurnEventPayload,
     TurnInterruptParams, TurnInterruptResult, TurnStartParams, TurnStartResult, TurnSteerParams,
     TurnSteerResult, TurnSummary,
 };
@@ -32,6 +36,7 @@ use crate::{
 pub struct ServerRuntime {
     metadata: InitializeResult,
     deps: ServerRuntimeDependencies,
+    rollout_store: RolloutStore,
     sessions: Mutex<HashMap<SessionId, Arc<Mutex<RuntimeSession>>>>,
     connections: Mutex<HashMap<u64, ConnectionRuntime>>,
     active_tasks: Mutex<HashMap<SessionId, tokio::task::AbortHandle>>,
@@ -40,6 +45,7 @@ pub struct ServerRuntime {
 
 impl ServerRuntime {
     pub fn new(server_home: PathBuf, deps: ServerRuntimeDependencies) -> Arc<Self> {
+        let rollout_store = RolloutStore::new(server_home.clone());
         Arc::new(Self {
             metadata: InitializeResult {
                 server_name: "clawcr-server".into(),
@@ -56,11 +62,20 @@ impl ServerRuntime {
                 },
             },
             deps,
+            rollout_store,
             sessions: Mutex::new(HashMap::new()),
             connections: Mutex::new(HashMap::new()),
             active_tasks: Mutex::new(HashMap::new()),
             next_connection_id: AtomicU64::new(1),
         })
+    }
+
+    /// Loads durable sessions from rollout files and installs them into the runtime map.
+    pub async fn load_persisted_sessions(self: &Arc<Self>) -> anyhow::Result<()> {
+        let sessions = self.rollout_store.load_sessions(&self.deps)?;
+        let mut runtime_sessions = self.sessions.lock().await;
+        runtime_sessions.extend(sessions);
+        Ok(())
     }
 
     pub async fn register_connection(
@@ -120,6 +135,8 @@ impl ServerRuntime {
 
         match method.as_str() {
             "session/start" => Some(self.handle_session_start(connection_id, id?, params).await),
+            "session/list" => Some(self.handle_session_list(id?, params).await),
+            "session/title/update" => Some(self.handle_session_title_update(id?, params).await),
             "session/resume" => Some(self.handle_session_resume(connection_id, id?, params).await),
             "session/fork" => Some(self.handle_session_fork(connection_id, id?, params).await),
             "turn/start" => Some(self.handle_turn_start(id?, params).await),
@@ -148,7 +165,7 @@ impl ServerRuntime {
         id: Option<serde_json::Value>,
         params: serde_json::Value,
     ) -> serde_json::Value {
-        let request_id = id.unwrap_or_else(|| serde_json::json!(null));
+        let request_id = id.unwrap_or(serde_json::Value::Null);
         match serde_json::from_value::<InitializeParams>(params) {
             Ok(params) => {
                 if let Some(connection) = self.connections.lock().await.get_mut(&connection_id) {
@@ -194,6 +211,17 @@ impl ServerRuntime {
             .model
             .clone()
             .unwrap_or_else(|| self.deps.default_model.clone());
+        let record = (!params.ephemeral).then(|| {
+            self.rollout_store.create_session_record(
+                session_id,
+                now,
+                params.cwd.clone(),
+                params.title.clone(),
+                Some(resolved_model.clone()),
+                self.deps.provider.name().to_string(),
+                None,
+            )
+        });
         let summary = crate::SessionSummary {
             session_id,
             cwd: params.cwd.clone(),
@@ -209,9 +237,19 @@ impl ServerRuntime {
             resolved_model: Some(resolved_model.clone()),
             status: SessionRuntimeStatus::Idle,
         };
+        if let Some(record) = &record {
+            if let Err(error) = self.rollout_store.append_session_meta(record) {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to persist session metadata: {error}"),
+                );
+            }
+        }
         self.sessions.lock().await.insert(
             session_id,
             RuntimeSession {
+                record,
                 summary: summary.clone(),
                 core_session: Arc::new(Mutex::new(self.deps.new_session_state(
                     session_id,
@@ -221,6 +259,7 @@ impl ServerRuntime {
                 active_turn: None,
                 latest_turn: None,
                 loaded_item_count: 0,
+                history_items: Vec::new(),
                 steering_queue: std::collections::VecDeque::new(),
                 active_task: None,
                 next_item_seq: 1,
@@ -245,6 +284,109 @@ impl ServerRuntime {
             },
         })
         .expect("serialize session/start response")
+    }
+
+    async fn handle_session_list(
+        &self,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        if let Err(error) = serde_json::from_value::<SessionListParams>(params) {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InvalidParams,
+                format!("invalid session/list params: {error}"),
+            );
+        }
+        let sessions = self
+            .sessions
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut summaries = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            summaries.push(session.lock().await.summary.clone());
+        }
+        summaries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        serde_json::to_value(SuccessResponse {
+            id: request_id,
+            result: SessionListResult {
+                sessions: summaries,
+            },
+        })
+        .expect("serialize session/list response")
+    }
+
+    async fn handle_session_title_update(
+        &self,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let params: SessionTitleUpdateParams = match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    format!("invalid session/title/update params: {error}"),
+                )
+            }
+        };
+        let new_title = params.title.trim();
+        if new_title.is_empty() {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InvalidParams,
+                "session title cannot be empty",
+            );
+        }
+        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
+
+        let summary = {
+            let mut session = session_arc.lock().await;
+            let previous_title = session.summary.title.clone();
+            let updated_at = Utc::now();
+            session.summary.title = Some(new_title.to_string());
+            session.summary.title_state =
+                SessionTitleState::Final(SessionTitleFinalSource::UserRename);
+            session.summary.updated_at = updated_at;
+            if let Some(record) = session.record.as_mut() {
+                record.title = Some(new_title.to_string());
+                record.title_state = SessionTitleState::Final(SessionTitleFinalSource::UserRename);
+                record.updated_at = updated_at;
+                if let Err(error) = self.rollout_store.append_title_update(
+                    record,
+                    new_title.to_string(),
+                    record.title_state.clone(),
+                    previous_title,
+                ) {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to persist session title update: {error}"),
+                    );
+                }
+            }
+            session.summary.clone()
+        };
+        self.broadcast_event(ServerEvent::SessionTitleUpdated(SessionEventPayload {
+            session: summary.clone(),
+        }))
+        .await;
+
+        serde_json::to_value(SuccessResponse {
+            id: request_id,
+            result: SessionTitleUpdateResult { session: summary },
+        })
+        .expect("serialize session/title/update response")
     }
 
     async fn handle_session_resume(
@@ -274,6 +416,7 @@ impl ServerRuntime {
         let session_summary = session.summary.clone();
         let latest_turn = session.latest_turn.clone();
         let loaded_item_count = session.loaded_item_count;
+        let history_items = session.history_items.clone();
         drop(session);
         self.subscribe_connection_to_session(connection_id, params.session_id, None)
             .await;
@@ -283,6 +426,7 @@ impl ServerRuntime {
                 session: session_summary,
                 latest_turn,
                 loaded_item_count,
+                history_items,
             },
         })
         .expect("serialize session/resume response")
@@ -344,22 +488,51 @@ impl ServerRuntime {
         core_session.last_input_tokens = source_core_session.last_input_tokens;
         let latest_turn = source.latest_turn.clone();
         let loaded_item_count = source.loaded_item_count;
+        let history_items = source.history_items.clone();
         drop(source_core_session);
         drop(source);
         self.sessions.lock().await.insert(
             forked_id,
             RuntimeSession {
+                record: None,
                 summary: summary.clone(),
                 core_session: Arc::new(Mutex::new(core_session)),
                 active_turn: None,
                 latest_turn,
                 loaded_item_count,
+                history_items,
                 steering_queue: std::collections::VecDeque::new(),
                 active_task: None,
                 next_item_seq: loaded_item_count + 1,
             }
             .shared(),
         );
+        let sessions = self.sessions.lock().await;
+        if let Some(forked_session) = sessions.get(&forked_id).cloned() {
+            drop(sessions);
+            let mut forked_session = forked_session.lock().await;
+            if !forked_session.summary.ephemeral {
+                let record = self.rollout_store.create_session_record(
+                    forked_id,
+                    now,
+                    forked_session.summary.cwd.clone(),
+                    forked_session.summary.title.clone(),
+                    forked_session.summary.resolved_model.clone(),
+                    self.deps.provider.name().to_string(),
+                    Some(params.session_id),
+                );
+                if let Err(error) = self.rollout_store.append_session_meta(&record) {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to persist forked session metadata: {error}"),
+                    );
+                }
+                forked_session.record = Some(record);
+            }
+        } else {
+            drop(sessions);
+        }
         self.subscribe_connection_to_session(connection_id, forked_id, None)
             .await;
         self.broadcast_event(ServerEvent::SessionStarted(SessionEventPayload {
@@ -465,6 +638,20 @@ impl ServerRuntime {
                 .insert(params.session_id, task.abort_handle());
             turn
         };
+        self.maybe_assign_provisional_title(params.session_id, &input_text)
+            .await;
+        if let Some(record) = session_arc.lock().await.record.clone() {
+            if let Err(error) = self
+                .rollout_store
+                .append_turn(&record, build_turn_record(&turn))
+            {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to persist turn start: {error}"),
+                );
+            }
+        }
 
         self.broadcast_event(ServerEvent::SessionStatusChanged(
             SessionStatusChangedPayload {
@@ -539,6 +726,18 @@ impl ServerRuntime {
             session.summary.updated_at = Utc::now();
             turn
         };
+        if let Some(record) = session_arc.lock().await.record.clone() {
+            if let Err(error) = self
+                .rollout_store
+                .append_turn(&record, build_turn_record(&interrupted_turn))
+            {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to persist interrupted turn: {error}"),
+                );
+            }
+        }
 
         self.broadcast_event(ServerEvent::TurnInterrupted(TurnEventPayload {
             session_id: params.session_id,
@@ -680,6 +879,9 @@ impl ServerRuntime {
             session_id,
             turn.turn_id,
             ItemKind::UserMessage,
+            TurnItem::UserMessage(TextItem {
+                text: input.clone(),
+            }),
             "You",
             input.clone(),
         )
@@ -693,26 +895,27 @@ impl ServerRuntime {
         let turn_for_events = turn.clone();
         let event_task = tokio::spawn(async move {
             let mut assistant_item_id = None;
+            let mut assistant_item_seq = None;
             let mut assistant_text = String::new();
             while let Some(event) = event_rx.recv().await {
                 match event {
                     QueryEvent::TextDelta(text) => {
-                        let item_id = match assistant_item_id {
-                            Some(item_id) => item_id,
-                            None => {
-                                let item_id = ItemId::new();
-                                runtime
-                                    .emit_item_started(
+                        let (item_id, item_seq) = match (assistant_item_id, assistant_item_seq) {
+                            (Some(item_id), Some(item_seq)) => (item_id, item_seq),
+                            (None, None) => {
+                                let (item_id, item_seq) = runtime
+                                    .start_item(
                                         session_id,
                                         turn_for_events.turn_id,
-                                        item_id,
                                         ItemKind::AgentMessage,
                                         serde_json::json!({ "title": "Assistant", "text": "" }),
                                     )
                                     .await;
                                 assistant_item_id = Some(item_id);
-                                item_id
+                                assistant_item_seq = Some(item_seq);
+                                (item_id, item_seq)
                             }
+                            _ => continue,
                         };
                         assistant_text.push_str(&text);
                         runtime
@@ -731,13 +934,40 @@ impl ServerRuntime {
                                 },
                             })
                             .await;
+                        let _ = item_seq;
                     }
                     QueryEvent::ToolUseStart { id, name, input } => {
+                        if let (Some(item_id), Some(item_seq)) =
+                            (assistant_item_id.take(), assistant_item_seq.take())
+                        {
+                            runtime
+                                .complete_item(
+                                    session_id,
+                                    turn_for_events.turn_id,
+                                    item_id,
+                                    item_seq,
+                                    ItemKind::AgentMessage,
+                                    TurnItem::AgentMessage(TextItem {
+                                        text: assistant_text.clone(),
+                                    }),
+                                    serde_json::json!({
+                                        "title": "Assistant",
+                                        "text": assistant_text,
+                                    }),
+                                )
+                                .await;
+                            assistant_text.clear();
+                        }
                         runtime
-                            .emit_item_pair(
+                            .emit_turn_item(
                                 session_id,
                                 turn_for_events.turn_id,
                                 ItemKind::ToolCall,
+                                TurnItem::ToolCall(ToolCallItem {
+                                    tool_call_id: id.clone(),
+                                    tool_name: name.clone(),
+                                    input: input.clone(),
+                                }),
                                 serde_json::json!({
                                     "tool_use_id": id,
                                     "tool_name": name,
@@ -752,10 +982,15 @@ impl ServerRuntime {
                         is_error,
                     } => {
                         runtime
-                            .emit_item_pair(
+                            .emit_turn_item(
                                 session_id,
                                 turn_for_events.turn_id,
                                 ItemKind::ToolResult,
+                                TurnItem::ToolResult(ToolResultItem {
+                                    tool_call_id: tool_use_id.clone(),
+                                    output: serde_json::Value::String(content.clone()),
+                                    is_error,
+                                }),
                                 serde_json::json!({
                                     "tool_use_id": tool_use_id,
                                     "content": content,
@@ -767,20 +1002,24 @@ impl ServerRuntime {
                     QueryEvent::Usage { .. } | QueryEvent::TurnComplete { .. } => {}
                 }
             }
-            if let Some(item_id) = assistant_item_id {
+            if let (Some(item_id), Some(item_seq)) = (assistant_item_id, assistant_item_seq) {
                 runtime
-                    .emit_item_completed(
+                    .complete_item(
                         session_id,
                         turn_for_events.turn_id,
                         item_id,
+                        item_seq,
                         ItemKind::AgentMessage,
+                        TurnItem::AgentMessage(TextItem {
+                            text: assistant_text.clone(),
+                        }),
                         serde_json::json!({ "title": "Assistant", "text": assistant_text }),
                     )
                     .await;
             }
         });
 
-        let result = {
+        let (result, first_assistant_reply) = {
             let core_session = {
                 let session = session_arc.lock().await;
                 Arc::clone(&session.core_session)
@@ -793,14 +1032,29 @@ impl ServerRuntime {
             });
             let registry = Arc::clone(&self.deps.registry);
             let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
-            query(
+            let result = query(
                 &mut core_session,
                 self.deps.provider.as_ref(),
                 registry,
                 &orchestrator,
                 Some(callback),
             )
-            .await
+            .await;
+            let first_assistant_reply = core_session.messages.iter().find_map(|message| {
+                if !matches!(message.role, clawcr_core::Role::Assistant) {
+                    return None;
+                }
+                let text = message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        clawcr_core::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                (!text.trim().is_empty()).then_some(text)
+            });
+            (result, first_assistant_reply)
         };
         drop(event_tx);
         let _ = event_task.await;
@@ -822,12 +1076,38 @@ impl ServerRuntime {
             session.summary.updated_at = Utc::now();
             final_turn
         };
+        if let Some(record) = session_arc.lock().await.record.clone() {
+            if let Err(error) = self
+                .rollout_store
+                .append_turn(&record, build_turn_record(&final_turn))
+            {
+                tracing::warn!(session_id = %session_id, error = %error, "failed to persist terminal turn line");
+            }
+        }
+        if final_turn.status == TurnStatus::Completed {
+            if let Some(first_assistant_reply) = first_assistant_reply {
+                let runtime = Arc::clone(&self);
+                let input_for_title = input.clone();
+                tokio::spawn(async move {
+                    runtime
+                        .maybe_generate_final_title(
+                            session_id,
+                            &input_for_title,
+                            &first_assistant_reply,
+                        )
+                        .await;
+                });
+            }
+        }
 
         if let Err(error) = result {
             self.emit_text_item(
                 session_id,
                 final_turn.turn_id,
                 ItemKind::AgentMessage,
+                TurnItem::AgentMessage(TextItem {
+                    text: error.to_string(),
+                }),
                 "Error",
                 error.to_string(),
             )
@@ -852,41 +1132,199 @@ impl ServerRuntime {
         .await;
     }
 
+    async fn maybe_assign_provisional_title(&self, session_id: SessionId, first_user_input: &str) {
+        let Some(candidate) = derive_provisional_title(first_user_input) else {
+            return;
+        };
+        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+            return;
+        };
+
+        let updated_summary = {
+            let mut session = session_arc.lock().await;
+            if session.summary.title.is_some()
+                || !matches!(session.summary.title_state, SessionTitleState::Unset)
+            {
+                return;
+            }
+
+            let previous_title = session.summary.title.clone();
+            let updated_at = Utc::now();
+            session.summary.title = Some(candidate.clone());
+            session.summary.title_state = SessionTitleState::Provisional;
+            session.summary.updated_at = updated_at;
+
+            if let Some(record) = session.record.as_mut() {
+                record.title = Some(candidate.clone());
+                record.title_state = SessionTitleState::Provisional;
+                record.updated_at = updated_at;
+                if let Err(error) = self.rollout_store.append_title_update(
+                    record,
+                    candidate.clone(),
+                    SessionTitleState::Provisional,
+                    previous_title,
+                ) {
+                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist provisional title");
+                }
+            }
+            session.summary.clone()
+        };
+
+        self.broadcast_event(ServerEvent::SessionTitleUpdated(SessionEventPayload {
+            session: updated_summary,
+        }))
+        .await;
+    }
+
+    async fn maybe_generate_final_title(
+        self: Arc<Self>,
+        session_id: SessionId,
+        first_user_input: &str,
+        first_assistant_reply: &str,
+    ) {
+        let (model, title_state) = {
+            let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+                return;
+            };
+            let session = session_arc.lock().await;
+            (
+                session
+                    .summary
+                    .resolved_model
+                    .clone()
+                    .unwrap_or_else(|| self.deps.default_model.clone()),
+                session.summary.title_state.clone(),
+            )
+        };
+
+        if matches!(
+            title_state,
+            SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate)
+                | SessionTitleState::Final(SessionTitleFinalSource::UserRename)
+                | SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated)
+        ) {
+            return;
+        }
+
+        let response = match self
+            .deps
+            .provider
+            .complete(build_title_generation_request(
+                model,
+                first_user_input,
+                first_assistant_reply,
+            ))
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(session_id = %session_id, error = %error, "title generation request failed");
+                return;
+            }
+        };
+        let Some(generated_title) = normalize_generated_title(&response.content) else {
+            tracing::warn!(session_id = %session_id, "title generation returned no valid title");
+            return;
+        };
+
+        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+            return;
+        };
+        let updated_summary = {
+            let mut session = session_arc.lock().await;
+            if matches!(
+                session.summary.title_state,
+                SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate)
+                    | SessionTitleState::Final(SessionTitleFinalSource::UserRename)
+                    | SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated)
+            ) {
+                return;
+            }
+
+            let previous_title = session.summary.title.clone();
+            let updated_at = Utc::now();
+            session.summary.title = Some(generated_title.clone());
+            session.summary.title_state =
+                SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated);
+            session.summary.updated_at = updated_at;
+
+            if let Some(record) = session.record.as_mut() {
+                record.title = Some(generated_title.clone());
+                record.title_state =
+                    SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated);
+                record.updated_at = updated_at;
+                if let Err(error) = self.rollout_store.append_title_update(
+                    record,
+                    generated_title.clone(),
+                    record.title_state.clone(),
+                    previous_title,
+                ) {
+                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist generated title");
+                }
+            }
+            session.summary.clone()
+        };
+
+        self.broadcast_event(ServerEvent::SessionTitleUpdated(SessionEventPayload {
+            session: updated_summary,
+        }))
+        .await;
+    }
+
     async fn emit_text_item(
         &self,
         session_id: SessionId,
         turn_id: TurnId,
         item_kind: ItemKind,
+        turn_item: TurnItem,
         title: impl Into<String>,
         text: String,
     ) {
-        self.emit_item_pair(
+        self.emit_turn_item(
             session_id,
             turn_id,
             item_kind,
+            turn_item,
             serde_json::json!({ "title": title.into(), "text": text }),
         )
         .await;
     }
 
-    async fn emit_item_pair(
+    async fn emit_turn_item(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        item_kind: ItemKind,
+        turn_item: TurnItem,
+        payload: serde_json::Value,
+    ) {
+        let (item_id, item_seq) = self
+            .start_item(session_id, turn_id, item_kind.clone(), payload.clone())
+            .await;
+        self.complete_item(
+            session_id,
+            turn_id,
+            item_id,
+            item_seq,
+            item_kind.clone(),
+            turn_item,
+            payload.clone(),
+        )
+        .await;
+    }
+
+    async fn start_item(
         &self,
         session_id: SessionId,
         turn_id: TurnId,
         item_kind: ItemKind,
         payload: serde_json::Value,
-    ) {
+    ) -> (ItemId, u64) {
         let item_id = ItemId::new();
-        self.emit_item_started(
-            session_id,
-            turn_id,
-            item_id,
-            item_kind.clone(),
-            payload.clone(),
-        )
-        .await;
-        self.emit_item_completed(session_id, turn_id, item_id, item_kind, payload)
+        let item_seq = self.allocate_item_sequence(session_id).await;
+        self.emit_item_started(session_id, turn_id, item_id, item_kind, payload)
             .await;
+        (item_id, item_seq)
     }
 
     async fn emit_item_started(
@@ -897,7 +1335,6 @@ impl ServerRuntime {
         item_kind: ItemKind,
         payload: serde_json::Value,
     ) {
-        self.bump_session_item_count(session_id).await;
         self.broadcast_event(ServerEvent::ItemStarted(ItemEventPayload {
             context: EventContext {
                 session_id,
@@ -938,12 +1375,74 @@ impl ServerRuntime {
         .await;
     }
 
-    async fn bump_session_item_count(&self, session_id: SessionId) {
+    async fn complete_item(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        item_id: ItemId,
+        item_seq: u64,
+        item_kind: ItemKind,
+        turn_item: TurnItem,
+        payload: serde_json::Value,
+    ) {
+        self.persist_item(
+            session_id,
+            turn_id,
+            item_id,
+            item_seq,
+            turn_item,
+            Some(TurnStatus::Running),
+            None,
+        )
+        .await;
+        self.emit_item_completed(session_id, turn_id, item_id, item_kind, payload)
+            .await;
+    }
+
+    async fn persist_item(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        item_id: ItemId,
+        item_seq: u64,
+        turn_item: TurnItem,
+        turn_status: Option<TurnStatus>,
+        worklog: Option<Worklog>,
+    ) {
+        if let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() {
+            let record = {
+                let mut session = session_arc.lock().await;
+                if let Some(history_item) = history_item_from_turn_item(&turn_item) {
+                    session.history_items.push(history_item);
+                }
+                session.record.clone()
+            };
+            if let Some(record) = record {
+                let item = build_item_record(
+                    session_id,
+                    turn_id,
+                    item_id,
+                    item_seq,
+                    turn_item,
+                    turn_status,
+                    worklog,
+                );
+                if let Err(error) = self.rollout_store.append_item(&record, item) {
+                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist item line");
+                }
+            }
+        }
+    }
+
+    async fn allocate_item_sequence(&self, session_id: SessionId) -> u64 {
         if let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() {
             let mut session = session_arc.lock().await;
+            let item_seq = session.next_item_seq;
             session.loaded_item_count += 1;
             session.next_item_seq += 1;
+            return item_seq;
         }
+        1
     }
 
     async fn subscribe_connection_to_session(
@@ -1072,6 +1571,7 @@ impl ServerEvent {
     fn session_id(&self) -> Option<SessionId> {
         match self {
             ServerEvent::SessionStarted(payload)
+            | ServerEvent::SessionTitleUpdated(payload)
             | ServerEvent::SessionArchived(payload)
             | ServerEvent::SessionUnarchived(payload)
             | ServerEvent::SessionClosed(payload) => Some(payload.session.session_id),
@@ -1093,6 +1593,7 @@ impl ServerEvent {
     fn method_name(&self) -> &'static str {
         match self {
             ServerEvent::SessionStarted(_) => "session/started",
+            ServerEvent::SessionTitleUpdated(_) => "session/title/updated",
             ServerEvent::SessionStatusChanged(_) => "session/status/changed",
             ServerEvent::SessionArchived(_) => "session/archived",
             ServerEvent::SessionUnarchived(_) => "session/unarchived",
@@ -1132,14 +1633,13 @@ impl ServerEvent {
 fn render_input_items(input: &[crate::InputItem]) -> Option<String> {
     let parts = input
         .iter()
-        .filter_map(|item| match item {
-            crate::InputItem::Text { text } => Some(text.trim().to_string()),
-            crate::InputItem::Skill { id } => Some(format!("[skill:{id}]")),
-            crate::InputItem::LocalImage { path } => Some(format!("[image:{}]", path.display())),
-            crate::InputItem::Mention { path, name } => Some(format!(
-                "[mention:{}]",
-                name.as_deref().unwrap_or(path.as_str())
-            )),
+        .map(|item| match item {
+            crate::InputItem::Text { text } => text.trim().to_string(),
+            crate::InputItem::Skill { id } => format!("[skill:{id}]"),
+            crate::InputItem::LocalImage { path } => format!("[image:{}]", path.display()),
+            crate::InputItem::Mention { path, name } => {
+                format!("[mention:{}]", name.as_deref().unwrap_or(path.as_str()))
+            }
         })
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>();

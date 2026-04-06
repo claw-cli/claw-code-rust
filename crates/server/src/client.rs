@@ -19,7 +19,8 @@ use tokio::{
 use crate::{
     ClientNotification, ClientRequest, ErrorResponse, InitializeParams, InitializeResult,
     NotificationEnvelope, ProtocolErrorCode, ServerEvent, SessionForkParams, SessionForkResult,
-    SessionResumeParams, SessionResumeResult, SessionStartParams, SessionStartResult,
+    SessionListParams, SessionListResult, SessionResumeParams, SessionResumeResult,
+    SessionStartParams, SessionStartResult, SessionTitleUpdateParams, SessionTitleUpdateResult,
     SuccessResponse, TurnInterruptParams, TurnInterruptResult, TurnStartParams, TurnStartResult,
     TurnSteerParams, TurnSteerResult,
 };
@@ -131,6 +132,19 @@ impl StdioServerClient {
         params: SessionResumeParams,
     ) -> Result<SessionResumeResult> {
         self.request("session/resume", params).await
+    }
+
+    /// Lists sessions currently known to the server.
+    pub async fn session_list(&mut self, params: SessionListParams) -> Result<SessionListResult> {
+        self.request("session/list", params).await
+    }
+
+    /// Updates the title for one persisted or in-memory session.
+    pub async fn session_title_update(
+        &mut self,
+        params: SessionTitleUpdateParams,
+    ) -> Result<SessionTitleUpdateResult> {
+        self.request("session/title/update", params).await
     }
 
     /// Forks an existing session and returns the typed result payload.

@@ -1,4 +1,17 @@
+use clawcr_core::SessionId;
 use ratatui::style::Color;
+/// One persisted session entry shown in the interactive session picker panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionListEntry {
+    /// Stable session identifier used when switching the active session.
+    pub session_id: SessionId,
+    /// Human-readable session title shown to the user.
+    pub title: String,
+    /// Timestamp summary rendered beside the title for quick scanning.
+    pub updated_at: String,
+    /// Whether this entry is the currently active session.
+    pub is_active: bool,
+}
 
 /// One event emitted by the background query worker into the interactive UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +57,40 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated in the session.
         total_output_tokens: usize,
+    },
+    /// Current known sessions were listed from the server.
+    SessionsListed {
+        /// Structured sessions rendered into the bottom picker panel.
+        sessions: Vec<SessionListEntry>,
+    },
+    /// The interactive client cleared its active session and is waiting for the next prompt.
+    NewSessionPrepared,
+    /// The active session changed.
+    SessionSwitched {
+        /// The new active session identifier.
+        session_id: String,
+        /// Optional human-readable session title.
+        title: Option<String>,
+        /// The model restored from the resumed session, when one exists.
+        model: Option<String>,
+        /// Replay-friendly transcript items loaded from the resumed session.
+        history_items: Vec<TranscriptItem>,
+        /// Number of persisted items loaded for the resumed session.
+        loaded_item_count: u64,
+    },
+    /// The current session title changed.
+    SessionRenamed {
+        /// The renamed session identifier.
+        session_id: String,
+        /// The new session title.
+        title: String,
+    },
+    /// The current session title changed due to automatic or explicit server-side updates.
+    SessionTitleUpdated {
+        /// The updated session identifier.
+        session_id: String,
+        /// The new best-known title.
+        title: String,
     },
 }
 
@@ -95,11 +142,11 @@ impl TranscriptItemKind {
     pub(crate) fn accent(self) -> Color {
         match self {
             TranscriptItemKind::User => Color::Cyan,
-            TranscriptItemKind::Assistant => Color::Green,
+            TranscriptItemKind::Assistant => Color::Cyan,
             TranscriptItemKind::ToolCall => Color::DarkGray,
             TranscriptItemKind::ToolResult => Color::DarkGray,
             TranscriptItemKind::Error => Color::Red,
-            TranscriptItemKind::System => Color::Magenta,
+            TranscriptItemKind::System => Color::DarkGray,
         }
     }
 }

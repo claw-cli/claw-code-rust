@@ -89,6 +89,62 @@ pub struct SessionResumeResult {
     pub latest_turn: Option<TurnSummary>,
     /// The number of items loaded while resuming the session.
     pub loaded_item_count: u64,
+    /// Replay-friendly history items used by interactive clients to rebuild the transcript.
+    pub history_items: Vec<SessionHistoryItem>,
+}
+
+/// Visual category for one replayed session-history item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionHistoryItemKind {
+    /// User-authored prompt text.
+    User,
+    /// Assistant-authored text.
+    Assistant,
+    /// Tool invocation summary.
+    ToolCall,
+    /// Successful tool output.
+    ToolResult,
+    /// Failed tool output.
+    Error,
+}
+
+/// One replay-friendly transcript item returned when resuming a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHistoryItem {
+    /// Stable visual category used by the client to render the item.
+    pub kind: SessionHistoryItemKind,
+    /// Short display title shown for tool and error items.
+    pub title: String,
+    /// Main text body rendered in the transcript.
+    pub body: String,
+}
+
+/// Describes the payload for `session/list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SessionListParams {}
+
+/// Describes the response returned by `session/list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionListResult {
+    /// Sessions known to the server, sorted by most recent update first.
+    pub sessions: Vec<SessionSummary>,
+}
+
+/// Describes the payload for `session/title/update`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTitleUpdateParams {
+    /// The session whose title should be changed.
+    pub session_id: SessionId,
+    /// The new explicit user-facing title.
+    pub title: String,
+}
+
+/// Describes the response returned by `session/title/update`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTitleUpdateResult {
+    /// The updated session summary visible to the client.
+    pub session: SessionSummary,
 }
 
 /// Describes the payload for `session/fork`.

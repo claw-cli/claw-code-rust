@@ -21,6 +21,8 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }
 unicode-width = { workspace = true }
+textwrap = { workspace = true }
 
 [dev-dependencies]
+chrono = { workspace = true }
 pretty_assertions = "1"

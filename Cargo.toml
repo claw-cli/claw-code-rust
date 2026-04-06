@@ -59,6 +59,7 @@ clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 ratatui = "0.29"
 unicode-width = "0.2"
+textwrap = "0.16"
 
 # Logging
 tracing = "0.1"

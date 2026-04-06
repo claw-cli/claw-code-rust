@@ -5,7 +5,7 @@ use crossterm::{
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 
 /// Shared terminal type used by the interactive UI.
 pub(crate) type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
@@ -25,6 +25,12 @@ impl ManagedTerminal {
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
         Ok(Self { terminal })
+    }
+
+    /// Returns the current terminal area.
+    pub(crate) fn area(&self) -> Rect {
+        let size = self.terminal.size().unwrap_or_default();
+        Rect::new(0, 0, size.width, size.height)
     }
 
     /// Returns a mutable reference to the underlying ratatui terminal.

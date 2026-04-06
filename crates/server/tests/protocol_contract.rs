@@ -10,7 +10,8 @@ use clawcr_server::{
     ApprovalScopeValue, ClientRequest, ClientTransportKind, DefaultProjection, EventContext,
     EventsSubscribeParams, InitializeParams, InputItem, ItemDeltaKind, ItemDeltaPayload,
     PendingServerRequestContext, ProtocolError, ProtocolErrorCode, ServerEvent, ServerRequestKind,
-    SessionProjector, SessionRuntimeStatus, SteerInputRecord, TurnKind, TurnProjector,
+    SessionProjector, SessionRuntimeStatus, SessionSummary, SessionTitleUpdateParams,
+    SteerInputRecord, TurnKind, TurnProjector,
 };
 
 #[test]
@@ -226,4 +227,36 @@ fn request_envelope_keeps_method_and_id() {
     let json = serde_json::to_string(&request).expect("serialize");
     assert!(json.contains("\"method\":\"session/start\""));
     assert!(json.contains("\"id\":1"));
+}
+
+#[test]
+fn session_title_update_params_roundtrip() {
+    let params = SessionTitleUpdateParams {
+        session_id: SessionId::new(),
+        title: "Renamed session".into(),
+    };
+
+    let json = serde_json::to_string(&params).expect("serialize");
+    let restored: SessionTitleUpdateParams = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(params, restored);
+}
+
+#[test]
+fn session_title_updated_event_serializes_expected_kind() {
+    let event = ServerEvent::SessionTitleUpdated(clawcr_server::SessionEventPayload {
+        session: SessionSummary {
+            session_id: SessionId::new(),
+            cwd: ".".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            title: Some("Renamed session".into()),
+            title_state: SessionTitleState::Final(SessionTitleFinalSource::UserRename),
+            ephemeral: false,
+            resolved_model: Some("claude-sonnet".into()),
+            status: SessionRuntimeStatus::Idle,
+        },
+    });
+
+    let json = serde_json::to_string(&event).expect("serialize");
+    assert!(json.contains("session_title_updated"));
 }
