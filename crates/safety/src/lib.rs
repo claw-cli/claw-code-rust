@@ -813,7 +813,7 @@ mod tests {
             )
             .expect("effective policy");
 
-        assert!(effective.writable_roots.contains(&PathBuf::from("C:\\tmp")));
+        assert!(effective.writable_roots.contains(&abs_path("tmp")));
         assert_eq!(effective.network, NetworkPolicy::AllowHosts { hosts });
     }
 
