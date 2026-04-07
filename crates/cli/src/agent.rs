@@ -110,12 +110,14 @@ pub async fn run_agent(cli: AgentCli, force_onboarding: bool) -> Result<()> {
     let server_env = server_env_overrides(&resolved);
     let model_catalog = BuiltinModelCatalog::load()?;
     let stored_config = config::load_config().unwrap_or_default();
+    let stored_profile = config::profile_for_provider(&stored_config, resolved.provider);
     let show_model_onboarding =
-        interactive && (force_onboarding || (cli.model.is_none() && stored_config.model.is_none()));
+        interactive && (force_onboarding || (cli.model.is_none() && stored_profile.model.is_none()));
 
     if interactive {
         run_interactive_tui(InteractiveTuiConfig {
             model: resolved.model,
+            provider: resolved.provider,
             cwd,
             server_env,
             startup_prompt: None,
@@ -142,7 +144,7 @@ pub async fn run_agent(cli: AgentCli, force_onboarding: bool) -> Result<()> {
 
 fn server_env_overrides(resolved: &config::ResolvedProviderSettings) -> Vec<(String, String)> {
     let mut env = vec![
-        ("CLAWCR_PROVIDER".to_string(), resolved.provider.clone()),
+        ("CLAWCR_PROVIDER".to_string(), resolved.provider.as_str().to_string()),
         ("CLAWCR_MODEL".to_string(), resolved.model.clone()),
     ];
     if let Some(base_url) = &resolved.base_url {

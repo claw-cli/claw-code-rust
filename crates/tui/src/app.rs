@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
-use clawcr_core::{BuiltinModelCatalog, ModelCatalog, SessionId};
+use clawcr_core::{BuiltinModelCatalog, ModelCatalog, ProviderKind, SessionId};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -54,6 +54,8 @@ pub(crate) enum AuxPanelContent {
 pub(crate) struct TuiApp {
     /// Model identifier shown in the header.
     pub(crate) model: String,
+    /// Provider family currently driving the active session.
+    pub(crate) provider: ProviderKind,
     /// Current working directory shown in the header.
     pub(crate) cwd: PathBuf,
     /// Scrollable chat history pane.
@@ -91,9 +93,11 @@ pub(crate) struct TuiApp {
     /// Built-in model catalog used for onboarding and model selection.
     model_catalog: BuiltinModelCatalog,
     /// Whether the app should open the model picker on startup.
-    show_model_onboarding: bool,
+    pub(crate) show_model_onboarding: bool,
     /// Whether onboarding completion has already been announced.
     onboarding_announced: bool,
+    /// Whether the onboarding flow is waiting for a manually typed custom model.
+    onboarding_custom_model_pending: bool,
     /// Timestamp of the most recent Ctrl+C press used for interrupt/exit confirmation.
     last_ctrl_c_at: Option<Instant>,
     /// Buffered rapid keypresses that should be applied as one pasted string.
@@ -106,6 +110,8 @@ pub(crate) struct TuiApp {
 pub struct InteractiveTuiConfig {
     /// Model identifier used for requests and shown in the header.
     pub model: String,
+    /// Provider family used for requests and shown in the picker.
+    pub provider: ProviderKind,
     /// Working directory shown in the header and passed to the session.
     pub cwd: PathBuf,
     /// Environment overrides applied to the spawned stdio server process.
@@ -130,6 +136,7 @@ impl TuiApp {
 
         let mut app = Self {
             model: config.model,
+            provider: config.provider,
             cwd: config.cwd,
             transcript: Vec::new(),
             input: InputBuffer::new(),
@@ -149,6 +156,7 @@ impl TuiApp {
             model_catalog: config.model_catalog,
             show_model_onboarding: config.show_model_onboarding,
             onboarding_announced: false,
+            onboarding_custom_model_pending: false,
             aux_panel_selection: 0,
             last_ctrl_c_at: None,
             paste_burst: PasteBurst::default(),
@@ -485,6 +493,30 @@ impl TuiApp {
     }
 
     fn handle_submission(&mut self, prompt: String) -> Result<()> {
+        if self.onboarding_custom_model_pending {
+            let model = prompt.trim();
+            if model.is_empty() {
+                self.status_message = "Enter a custom model name to continue".to_string();
+                return Ok(());
+            }
+
+            self.onboarding_custom_model_pending = false;
+            self.set_model(model.to_string())?;
+            self.aux_panel = None;
+            self.aux_panel_selection = 0;
+            self.status_message = format!("Custom model set to {model}");
+            if self.show_model_onboarding && !self.onboarding_announced {
+                self.push_item(
+                    TranscriptItemKind::System,
+                    "Onboarding",
+                    "Onboarding complete. Run `clawcr onboard` any time to revisit builtin models.",
+                );
+                self.onboarding_announced = true;
+                self.show_model_onboarding = false;
+            }
+            return Ok(());
+        }
+
         if prompt.trim_start().starts_with('/') {
             return self.handle_slash_command(prompt);
         }
@@ -536,7 +568,7 @@ impl TuiApp {
             .unwrap_or(0);
         self.aux_panel = Some(AuxPanel {
             title: if self.show_model_onboarding {
-                "✨".to_string()
+                "Built-in models".to_string()
             } else {
                 "Models".to_string()
             },
@@ -546,14 +578,20 @@ impl TuiApp {
 
     fn model_picker_entries(&self) -> Vec<ModelListEntry> {
         let mut entries = Vec::new();
+        let onboarding_provider = self.show_model_onboarding.then_some(self.provider);
 
         for model in self.model_catalog.list_visible() {
+            if onboarding_provider.is_some_and(|provider| model.provider != provider) {
+                continue;
+            }
             entries.push(ModelListEntry {
                 slug: model.slug.clone(),
                 display_name: model.display_name.clone(),
+                provider: model.provider,
                 description: model.description.clone(),
                 is_current: model.slug == self.model,
                 is_builtin: true,
+                is_custom_mode: false,
             });
         }
 
@@ -563,20 +601,36 @@ impl TuiApp {
                 ModelListEntry {
                     slug: self.model.clone(),
                     display_name: self.model.clone(),
+                    provider: self.provider,
                     description: Some("current model".to_string()),
                     is_current: true,
                     is_builtin: false,
+                    is_custom_mode: false,
                 },
             );
+        }
+
+        if self.show_model_onboarding {
+            entries.push(ModelListEntry {
+                slug: "__custom__".to_string(),
+                display_name: "Custom model".to_string(),
+                provider: self.provider,
+                description: Some("enter a model name manually".to_string()),
+                is_current: false,
+                is_builtin: false,
+                is_custom_mode: true,
+            });
         }
 
         if entries.is_empty() {
             entries.push(ModelListEntry {
                 slug: self.model.clone(),
                 display_name: self.model.clone(),
+                provider: self.provider,
                 description: Some("current model".to_string()),
                 is_current: true,
                 is_builtin: false,
+                is_custom_mode: false,
             });
         }
 
@@ -1038,9 +1092,16 @@ impl TuiApp {
                 if models.is_empty() {
                     return false;
                 }
-                let selected = models[self.aux_panel_selection.min(models.len() - 1)]
-                    .slug
-                    .clone();
+                let selected = &models[self.aux_panel_selection.min(models.len() - 1)];
+                if selected.is_custom_mode {
+                    self.aux_panel = None;
+                    self.aux_panel_selection = 0;
+                    self.onboarding_custom_model_pending = true;
+                    self.status_message = "Enter a custom model name and press Enter".to_string();
+                    self.input.clear();
+                    return true;
+                }
+                let selected = selected.slug.clone();
                 if let Err(error) = self.set_model(selected.clone()) {
                     self.push_item(
                         TranscriptItemKind::Error,
@@ -1079,7 +1140,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Instant;
 
-    use clawcr_core::{BuiltinModelCatalog, SessionId};
+    use clawcr_core::{BuiltinModelCatalog, ProviderKind, SessionId};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use pretty_assertions::assert_eq;
     use ratatui::layout::Rect;
@@ -1095,6 +1156,7 @@ mod tests {
     fn test_app() -> TuiApp {
         TuiApp {
             model: "test-model".to_string(),
+            provider: ProviderKind::Anthropic,
             cwd: PathBuf::from("."),
             transcript: Vec::new(),
             input: InputBuffer::new(),
@@ -1113,6 +1175,7 @@ mod tests {
             model_catalog: BuiltinModelCatalog::default(),
             show_model_onboarding: false,
             onboarding_announced: false,
+            onboarding_custom_model_pending: false,
             aux_panel: None,
             aux_panel_selection: 0,
             last_ctrl_c_at: None,

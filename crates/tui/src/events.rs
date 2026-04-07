@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use clawcr_core::SessionId;
+use clawcr_core::{ProviderKind, SessionId};
 use ratatui::style::Color;
 /// One persisted session entry shown in the interactive session picker panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,12 +22,16 @@ pub(crate) struct ModelListEntry {
     pub slug: String,
     /// Human-readable display name shown to the user.
     pub display_name: String,
+    /// Provider family for the model.
+    pub provider: ProviderKind,
     /// Optional descriptive text rendered beneath the model name.
     pub description: Option<String>,
     /// Whether this entry is the currently active model.
     pub is_current: bool,
     /// Whether this model comes from the built-in catalog.
     pub is_builtin: bool,
+    /// Whether this row launches the custom model input flow.
+    pub is_custom_mode: bool,
 }
 
 /// One event emitted by the background query worker into the interactive UI.

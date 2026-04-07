@@ -1,14 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use clawcr_core::ProviderKind;
 use clawcr_utils::{current_user_config_file, FileSystemConfigPathResolver};
 use serde::{Deserialize, Serialize};
 
-/// Persisted provider configuration.
+/// One provider-specific model profile stored in config.toml.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AppConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
+pub struct ProviderProfile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -17,10 +16,29 @@ pub struct AppConfig {
     pub api_key: Option<String>,
 }
 
+impl ProviderProfile {
+    fn is_empty(&self) -> bool {
+        self.model.is_none() && self.base_url.is_none() && self.api_key.is_none()
+    }
+}
+
+/// Persisted provider configuration grouped by provider family.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AppConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_provider: Option<ProviderKind>,
+    #[serde(default, skip_serializing_if = "ProviderProfile::is_empty")]
+    pub anthropic: ProviderProfile,
+    #[serde(default, skip_serializing_if = "ProviderProfile::is_empty")]
+    pub openai: ProviderProfile,
+    #[serde(default, skip_serializing_if = "ProviderProfile::is_empty")]
+    pub ollama: ProviderProfile,
+}
+
 /// The fully-resolved provider settings that can be forwarded to a server process.
 pub struct ResolvedProviderSettings {
     /// Normalized provider name.
-    pub provider: String,
+    pub provider: ProviderKind,
     /// Final model identifier.
     pub model: String,
     /// Optional provider base URL override.
@@ -61,7 +79,9 @@ fn legacy_cli_config_path() -> Result<PathBuf> {
 fn load_legacy_json_config(path: &Path) -> Result<AppConfig> {
     let data = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&data).with_context(|| format!("failed to parse {}", path.display()))
+    let legacy: LegacyAppConfig =
+        serde_json::from_str(&data).with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(legacy.into_app_config())
 }
 
 pub fn load_config() -> Result<AppConfig> {
@@ -69,9 +89,23 @@ pub fn load_config() -> Result<AppConfig> {
     if path.exists() {
         let data = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let cfg: AppConfig =
+        let value: toml::Value =
             toml::from_str(&data).with_context(|| format!("failed to parse {}", path.display()))?;
-        return Ok(cfg);
+        let table = value.as_table().cloned().unwrap_or_default();
+        if table.contains_key("default_provider")
+            || table.contains_key("anthropic")
+            || table.contains_key("openai")
+            || table.contains_key("ollama")
+        {
+            return value
+                .try_into()
+                .with_context(|| format!("failed to parse {}", path.display()));
+        }
+
+        let legacy_cfg: LegacyAppConfig = value
+            .try_into()
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        return Ok(legacy_cfg.into_app_config());
     }
 
     let legacy_json_path = legacy_json_config_path()?;
@@ -112,26 +146,33 @@ fn env_non_empty(name: &str) -> Option<String> {
 
 /// Build a partial config from environment variables.
 fn env_config() -> AppConfig {
-    let api_key =
+    let anthropic_api_key =
         env_non_empty("ANTHROPIC_API_KEY").or_else(|| env_non_empty("ANTHROPIC_AUTH_TOKEN"));
-    let base_url = env_non_empty("ANTHROPIC_BASE_URL");
+    let anthropic_base_url = env_non_empty("ANTHROPIC_BASE_URL");
+    let openai_api_key = env_non_empty("OPENAI_API_KEY");
+    let openai_base_url = env_non_empty("OPENAI_BASE_URL");
 
-    // If any Anthropic auth is present, provider is anthropic
-    let provider = if api_key.is_some() {
-        Some("anthropic".to_string())
-    } else if env_non_empty("OPENAI_API_KEY").is_some()
-        || env_non_empty("OPENAI_BASE_URL").is_some()
-    {
-        Some("openai".to_string())
+    let default_provider = if anthropic_api_key.is_some() || anthropic_base_url.is_some() {
+        Some(ProviderKind::Anthropic)
+    } else if openai_api_key.is_some() || openai_base_url.is_some() {
+        Some(ProviderKind::Openai)
     } else {
         None
     };
 
     AppConfig {
-        provider,
-        model: None,
-        base_url,
-        api_key,
+        default_provider,
+        anthropic: ProviderProfile {
+            model: None,
+            base_url: anthropic_base_url,
+            api_key: anthropic_api_key,
+        },
+        openai: ProviderProfile {
+            model: None,
+            base_url: openai_base_url,
+            api_key: openai_api_key,
+        },
+        ollama: ProviderProfile::default(),
     }
 }
 
@@ -150,23 +191,32 @@ pub fn resolve_provider_settings(
     let file = load_config().unwrap_or_default();
 
     let provider_name = cli_provider
-        .map(str::to_string)
-        .or(env.provider.clone())
-        .or(file.provider.clone());
-    let api_key = env.api_key.clone().or(file.api_key.clone());
-    let base_url = env.base_url.clone().or(file.base_url.clone());
-    let model_override = cli_model
-        .map(str::to_string)
-        .or(env.model.clone())
-        .or(file.model.clone());
+        .and_then(|provider| parse_provider_kind(provider).ok())
+        .or(env.default_provider)
+        .or(file.default_provider)
+        .or_else(|| infer_default_provider(&file));
 
-    if let Some(name) = provider_name {
-        let normalized_base_url =
-            normalized_base_url(cli_ollama_url, Some(name.as_str()), base_url);
+    if let Some(provider_name) = provider_name {
+        let selected_profile = profile_for_provider(&file, provider_name);
+        let env_profile = profile_for_provider(&env, provider_name);
+        let model_override = cli_model
+            .map(str::to_string)
+            .or(env_profile.model.clone())
+            .or(selected_profile.model.clone());
+
+        let base_url = env_profile
+            .base_url
+            .clone()
+            .or(selected_profile.base_url.clone());
+        let api_key = env_profile
+            .api_key
+            .clone()
+            .or(selected_profile.api_key.clone());
+
         return Ok(ResolvedProviderSettings {
-            model: default_model_for_provider(&name, model_override),
-            provider: name,
-            base_url: normalized_base_url,
+            model: default_model_for_provider(provider_name, model_override),
+            provider: provider_name,
+            base_url: normalized_base_url(cli_ollama_url, provider_name, base_url),
             api_key,
         });
     }
@@ -177,18 +227,15 @@ pub fn resolve_provider_settings(
         save_config(&onboard_config)?;
 
         let provider = onboard_config
-            .provider
-            .unwrap_or_else(|| "anthropic".to_string());
-        let model = default_model_for_provider(&provider, model_override.or(onboard_config.model));
+            .default_provider
+            .unwrap_or(ProviderKind::Anthropic);
+        let profile = profile_for_provider(&onboard_config, provider);
+        let model = default_model_for_provider(provider, profile.model.clone());
         return Ok(ResolvedProviderSettings {
-            provider: provider.clone(),
+            provider,
             model,
-            base_url: normalized_base_url(
-                cli_ollama_url,
-                Some(provider.as_str()),
-                onboard_config.base_url,
-            ),
-            api_key: onboard_config.api_key,
+            base_url: normalized_base_url(cli_ollama_url, provider, profile.base_url.clone()),
+            api_key: profile.api_key.clone(),
         });
     }
 
@@ -198,25 +245,105 @@ pub fn resolve_provider_settings(
     )
 }
 
-fn default_model_for_provider(name: &str, model: Option<String>) -> String {
-    model.unwrap_or_else(|| match name {
-        "anthropic" => "claude-sonnet-4-20250514".to_string(),
-        "ollama" => "qwen3.5:9b".to_string(),
-        "openai" => "gpt-4o".to_string(),
-        _ => "claude-sonnet-4-20250514".to_string(),
+fn default_model_for_provider(provider: ProviderKind, model: Option<String>) -> String {
+    model.unwrap_or_else(|| match provider {
+        ProviderKind::Anthropic => "claude-sonnet-4-20250514".to_string(),
+        ProviderKind::Ollama => "qwen3.5:9b".to_string(),
+        ProviderKind::Openai => "gpt-4o".to_string(),
     })
+}
+
+fn parse_provider_kind(value: &str) -> Result<ProviderKind> {
+    match value.to_ascii_lowercase().as_str() {
+        "anthropic" => Ok(ProviderKind::Anthropic),
+        "openai" => Ok(ProviderKind::Openai),
+        "ollama" => Ok(ProviderKind::Ollama),
+        other => anyhow::bail!("unknown provider `{other}`"),
+    }
+}
+
+fn infer_default_provider(config: &AppConfig) -> Option<ProviderKind> {
+    if !config.anthropic.is_empty() {
+        Some(ProviderKind::Anthropic)
+    } else if !config.openai.is_empty() {
+        Some(ProviderKind::Openai)
+    } else if !config.ollama.is_empty() {
+        Some(ProviderKind::Ollama)
+    } else {
+        None
+    }
+}
+
+pub fn profile_for_provider(config: &AppConfig, provider: ProviderKind) -> &ProviderProfile {
+    match provider {
+        ProviderKind::Anthropic => &config.anthropic,
+        ProviderKind::Openai => &config.openai,
+        ProviderKind::Ollama => &config.ollama,
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyAppConfig {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+}
+
+impl LegacyAppConfig {
+    fn into_app_config(self) -> AppConfig {
+        let provider = self.provider.and_then(|value| parse_provider_kind(&value).ok());
+        let profile = ProviderProfile {
+            model: self.model,
+            base_url: self.base_url,
+            api_key: self.api_key,
+        };
+        let default_provider = provider.or_else(|| {
+            if profile.api_key.is_some() || profile.base_url.is_some() || profile.model.is_some() {
+                Some(ProviderKind::Anthropic)
+            } else {
+                None
+            }
+        });
+
+        match default_provider {
+            Some(ProviderKind::Anthropic) => AppConfig {
+                default_provider,
+                anthropic: profile,
+                openai: ProviderProfile::default(),
+                ollama: ProviderProfile::default(),
+            },
+            Some(ProviderKind::Openai) => AppConfig {
+                default_provider,
+                anthropic: ProviderProfile::default(),
+                openai: profile,
+                ollama: ProviderProfile::default(),
+            },
+            Some(ProviderKind::Ollama) => AppConfig {
+                default_provider,
+                anthropic: ProviderProfile::default(),
+                openai: ProviderProfile::default(),
+                ollama: profile,
+            },
+            None => AppConfig::default(),
+        }
+    }
 }
 
 fn normalized_base_url(
     cli_ollama_url: &str,
-    provider_name: Option<&str>,
+    provider_name: ProviderKind,
     base_url: Option<String>,
 ) -> Option<String> {
     match provider_name {
-        Some("ollama") => Some(ensure_openai_v1(
+        ProviderKind::Ollama => Some(ensure_openai_v1(
             base_url.as_deref().unwrap_or(cli_ollama_url),
         )),
-        Some("openai") => Some(ensure_openai_v1(
+        ProviderKind::Openai => Some(ensure_openai_v1(
             base_url.as_deref().unwrap_or("https://api.openai.com"),
         )),
         _ => base_url,

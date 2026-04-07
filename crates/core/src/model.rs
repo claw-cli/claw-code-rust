@@ -1,5 +1,28 @@
 use serde::{Deserialize, Serialize};
 
+/// Supported provider families for models and persisted configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderKind {
+    /// Anthropic Claude models.
+    Anthropic,
+    /// OpenAI-compatible hosted models.
+    Openai,
+    /// Local Ollama models.
+    Ollama,
+}
+
+impl ProviderKind {
+    /// Returns the stable provider label used in config and UI text.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderKind::Anthropic => "anthropic",
+            ProviderKind::Openai => "openai",
+            ProviderKind::Ollama => "ollama",
+        }
+    }
+}
+
 /// Enumerates the reasoning effort levels a model may support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -107,6 +130,8 @@ pub struct ModelConfig {
     pub slug: String,
     /// The human-readable display name for the model.
     pub display_name: String,
+    /// The provider family that serves this model.
+    pub provider: ProviderKind,
     /// Optional descriptive text for UI or diagnostics.
     pub description: Option<String>,
     /// The reasoning level used when no explicit override is supplied.
@@ -140,6 +165,7 @@ impl Default for ModelConfig {
         Self {
             slug: String::new(),
             display_name: String::new(),
+            provider: ProviderKind::Anthropic,
             description: None,
             default_reasoning_level: ReasoningLevel::default(),
             supported_reasoning_levels: vec![ReasoningLevel::default()],
@@ -226,13 +252,14 @@ pub enum ModelConfigError {
 mod tests {
     use super::{
         InMemoryModelCatalog, InputModality, ModelCatalog, ModelConfig, ModelVisibility,
-        ReasoningLevel, TruncationPolicyConfig,
+        ProviderKind, ReasoningLevel, TruncationPolicyConfig,
     };
 
     fn model(slug: &str, priority: i32, visibility: ModelVisibility) -> ModelConfig {
         ModelConfig {
             slug: slug.into(),
             display_name: slug.into(),
+            provider: ProviderKind::Anthropic,
             description: None,
             default_reasoning_level: ReasoningLevel::Medium,
             supported_reasoning_levels: vec![ReasoningLevel::Medium],

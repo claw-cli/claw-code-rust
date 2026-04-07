@@ -2,7 +2,9 @@ use std::io::{self, BufRead, Write};
 
 use anyhow::Result;
 
-use crate::config::{save_config, AppConfig};
+use clawcr_core::ProviderKind;
+
+use crate::config::{AppConfig, ProviderProfile};
 
 /// Run the first-time interactive setup wizard.
 ///
@@ -30,7 +32,7 @@ pub fn run_onboarding() -> Result<AppConfig> {
         _ => unreachable!(),
     };
 
-    save_config(&config)?;
+    crate::config::save_config(&config)?;
     println!();
     println!("Config saved. You can change it later by editing ~/.clawcr/config.toml");
     println!("or by setting environment variables (ANTHROPIC_API_KEY, etc.).");
@@ -49,13 +51,17 @@ fn setup_anthropic() -> Result<AppConfig> {
 
     let api_key = prompt_string("API key")?;
     let base_url = prompt_optional("Custom base URL (leave empty for default)")?;
-    let model = prompt_optional("Model (leave empty for claude-sonnet-4-20250514)")?;
+    let model = choose_model("claude-sonnet-4-20250514")?;
 
     Ok(AppConfig {
-        provider: Some("anthropic".into()),
-        api_key: Some(api_key),
-        base_url,
-        model,
+        default_provider: Some(ProviderKind::Anthropic),
+        anthropic: ProviderProfile {
+            model: Some(model),
+            base_url,
+            api_key: Some(api_key),
+        },
+        openai: ProviderProfile::default(),
+        ollama: ProviderProfile::default(),
     })
 }
 
@@ -67,13 +73,17 @@ fn setup_ollama() -> Result<AppConfig> {
     println!();
 
     let base_url = prompt_with_default("Ollama URL", "http://localhost:11434")?;
-    let model = prompt_with_default("Model", "qwen3.5:9b")?;
+    let model = choose_model("qwen3.5:9b")?;
 
     Ok(AppConfig {
-        provider: Some("ollama".into()),
-        api_key: None,
-        base_url: Some(base_url),
-        model: Some(model),
+        default_provider: Some(ProviderKind::Ollama),
+        anthropic: ProviderProfile::default(),
+        openai: ProviderProfile::default(),
+        ollama: ProviderProfile {
+            model: Some(model),
+            base_url: Some(base_url),
+            api_key: None,
+        },
     })
 }
 
@@ -85,14 +95,32 @@ fn setup_openai_compat() -> Result<AppConfig> {
 
     let base_url = prompt_string("Base URL (e.g. https://api.openai.com)")?;
     let api_key = prompt_optional("API key (leave empty if not required)")?;
-    let model = prompt_with_default("Model", "gpt-4o")?;
+    let model = choose_model("gpt-4o")?;
 
     Ok(AppConfig {
-        provider: Some("openai".into()),
-        api_key,
-        base_url: Some(base_url),
-        model: Some(model),
+        default_provider: Some(ProviderKind::Openai),
+        anthropic: ProviderProfile::default(),
+        openai: ProviderProfile {
+            model: Some(model),
+            base_url: Some(base_url),
+            api_key,
+        },
+        ollama: ProviderProfile::default(),
     })
+}
+
+fn choose_model(default_model: &str) -> Result<String> {
+    println!();
+    println!("Choose a model mode:");
+    println!("  [1] Built-in default");
+    println!("  [2] Custom model");
+    println!();
+
+    match prompt_choice("Model mode [1/2]", 1, 2)? {
+        1 => Ok(default_model.to_string()),
+        2 => prompt_with_default("Model", default_model),
+        _ => unreachable!(),
+    }
 }
 
 // ---------------------------------------------------------------------------

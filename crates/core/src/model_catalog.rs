@@ -2,7 +2,7 @@ use serde::Deserialize;
 
 use crate::{
     InputModality, ModelCatalog, ModelConfig, ModelConfigError, ModelVisibility, ReasoningLevel,
-    TruncationPolicyConfig,
+    ProviderKind, TruncationPolicyConfig,
 };
 
 /// Filesystem-independent loader for the built-in model catalog bundled with the binary.
@@ -80,6 +80,7 @@ pub enum BuiltinModelCatalogError {
 struct RawBuiltinModelConfig {
     slug: String,
     display_name: String,
+    provider: ProviderKind,
     #[serde(default)]
     description: String,
     #[serde(default, deserialize_with = "deserialize_reasoning_level")]
@@ -110,6 +111,7 @@ impl RawBuiltinModelConfig {
         let mut model = ModelConfig::default();
         model.slug = self.slug;
         model.display_name = self.display_name;
+        model.provider = self.provider;
         model.description = if self.description.trim().is_empty() {
             None
         } else {

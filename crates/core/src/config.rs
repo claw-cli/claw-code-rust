@@ -960,14 +960,15 @@ mod tests {
         TitleModelSelection,
     };
     use crate::model::{
-        InMemoryModelCatalog, InputModality, ModelConfig, ModelVisibility, ReasoningLevel,
-        TruncationPolicyConfig,
+        InMemoryModelCatalog, InputModality, ModelConfig, ModelVisibility, ProviderKind,
+        ReasoningLevel, TruncationPolicyConfig,
     };
 
     fn test_model(slug: &str) -> ModelConfig {
         ModelConfig {
             slug: slug.into(),
             display_name: slug.into(),
+            provider: ProviderKind::Anthropic,
             description: None,
             default_reasoning_level: ReasoningLevel::Medium,
             supported_reasoning_levels: vec![ReasoningLevel::Medium],

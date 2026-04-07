@@ -203,7 +203,13 @@ fn render_composer(app: &TuiApp, inner_width: u16) -> Paragraph<'_> {
                     let selected =
                         index == app.aux_panel_selection.min(entries.len().saturating_sub(1));
                     let marker = if entry.is_current { "*" } else { " " };
-                    let label = if entry.is_builtin { "✨" } else { "custom" };
+                    let label = if entry.is_custom_mode {
+                        "custom"
+                    } else if entry.is_builtin {
+                        entry.provider.as_str()
+                    } else {
+                        "current"
+                    };
                     let style = if selected {
                         Style::new().black().on_gray()
                     } else {
@@ -220,19 +226,18 @@ fn render_composer(app: &TuiApp, inner_width: u16) -> Paragraph<'_> {
                         .as_deref()
                         .filter(|description| !description.trim().is_empty())
                         .unwrap_or(label);
-                    append_wrapped_composer_session_entry(
-                        &mut lines,
-                        &format!(
+                    let row = if app.show_model_onboarding {
+                        format!("  {marker} {}  [{}]  {}", entry.display_name, entry.slug, description)
+                    } else {
+                        format!(
                             "  {} {marker} {}  [{}]  {}",
                             if selected { ">" } else { "•" },
                             entry.display_name,
                             entry.slug,
                             description
-                        ),
-                        inner_width,
-                        style,
-                        title_style,
-                    );
+                        )
+                    };
+                    append_wrapped_composer_session_entry(&mut lines, &row, inner_width, style, title_style);
                 }
             }
         }
@@ -673,14 +678,22 @@ pub(crate) fn composer_height(app: &TuiApp, area: Rect) -> u16 {
                         .description
                         .as_deref()
                         .filter(|description| !description.trim().is_empty())
-                        .unwrap_or("custom model");
-                    let rendered = format!(
-                        "  {} {marker} {}  [{}]  {}",
-                        if selected { ">" } else { "•" },
-                        entry.display_name,
-                        entry.slug,
-                        description
-                    );
+                        .unwrap_or(if entry.is_custom_mode {
+                            "custom model"
+                        } else {
+                            entry.provider.as_str()
+                        });
+                    let rendered = if app.show_model_onboarding {
+                        format!("  {marker} {}  [{}]  {}", entry.display_name, entry.slug, description)
+                    } else {
+                        format!(
+                            "  {} {marker} {}  [{}]  {}",
+                            if selected { ">" } else { "•" },
+                            entry.display_name,
+                            entry.slug,
+                            description
+                        )
+                    };
                     total = total.saturating_add(wrapped_line_count_with_prefix(
                         &rendered,
                         inner_width,
