@@ -202,55 +202,47 @@ fn env_config() -> AppConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Provider resolution: CLI flags > env vars > config file > onboarding
+// Provider resolution: env vars > config file > onboarding
 // ---------------------------------------------------------------------------
 
 /// Resolves provider settings without constructing a local provider instance.
-pub fn resolve_provider_settings(
-    cli_provider: Option<&str>,
-    cli_model: Option<&str>,
-    cli_ollama_url: &str,
-    _interactive: bool,
-) -> Result<ResolvedProviderSettings> {
+pub fn resolve_provider_settings() -> Result<ResolvedProviderSettings> {
     let env = env_config();
     let file = load_config().unwrap_or_default();
 
-    let provider_name = cli_provider
-        .and_then(|provider| parse_provider_kind(provider).ok())
-        .or_else(|| cli_model.and_then(|model| provider_for_model(&file, model)))
-        .or(env.default_provider)
+    let provider_name = env
+        .default_provider
         .or(file.default_provider)
         .or_else(|| infer_default_provider(&file));
 
     if let Some(provider_name) = provider_name {
         let selected_profile = profile_for_provider(&file, provider_name);
         let env_profile = profile_for_provider(&env, provider_name);
-        let selected_model = select_configured_model(selected_profile, cli_model)
-            .or_else(|| select_configured_model(env_profile, cli_model));
-        let model = selected_model
-            .map(|model| model.model.clone())
-            .or_else(|| cli_model.map(str::to_string))
-            .or_else(|| selected_profile.default_model.clone())
+        let model = selected_profile
+            .default_model
+            .clone()
             .or_else(|| {
                 selected_profile
                     .models
                     .first()
                     .map(|model| model.model.clone())
             })
+            .or_else(|| env_profile.default_model.clone())
+            .or_else(|| env_profile.models.first().map(|model| model.model.clone()))
             .unwrap_or_else(|| default_model_for_provider(provider_name));
-        let base_url = selected_model
-            .and_then(|model| model.base_url.clone())
-            .or_else(|| selected_profile.base_url.clone())
+        let base_url = selected_profile
+            .base_url
+            .clone()
             .or_else(|| env_profile.base_url.clone());
-        let api_key = selected_model
-            .and_then(|model| model.api_key.clone())
-            .or_else(|| selected_profile.api_key.clone())
+        let api_key = selected_profile
+            .api_key
+            .clone()
             .or_else(|| env_profile.api_key.clone());
 
         return Ok(ResolvedProviderSettings {
             model,
             provider: provider_name,
-            base_url: normalized_base_url(cli_ollama_url, provider_name, base_url),
+            base_url,
             api_key,
         });
     }
@@ -296,43 +288,6 @@ pub fn profile_for_provider(config: &AppConfig, provider: ProviderKind) -> &Prov
         ProviderKind::Openai => &config.openai,
         ProviderKind::Ollama => &config.ollama,
     }
-}
-
-fn select_configured_model<'a>(
-    profile: &'a ProviderProfile,
-    requested_model: Option<&str>,
-) -> Option<&'a ConfiguredModel> {
-    match requested_model {
-        Some(model) => profile.models.iter().find(|entry| entry.model == model),
-        None => profile
-            .default_model
-            .as_deref()
-            .and_then(|default_model| {
-                profile
-                    .models
-                    .iter()
-                    .find(|entry| entry.model == default_model)
-            })
-            .or_else(|| profile.models.first()),
-    }
-}
-
-fn provider_for_model(config: &AppConfig, requested_model: &str) -> Option<ProviderKind> {
-    for (provider, profile) in [
-        (ProviderKind::Anthropic, &config.anthropic),
-        (ProviderKind::Openai, &config.openai),
-        (ProviderKind::Ollama, &config.ollama),
-    ] {
-        if profile
-            .models
-            .iter()
-            .any(|entry| entry.model == requested_model)
-            || profile.default_model.as_deref() == Some(requested_model)
-        {
-            return Some(provider);
-        }
-    }
-    None
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -454,122 +409,5 @@ fn legacy_section_profile_into_provider_profile(
             })
             .into_iter()
             .collect(),
-    }
-}
-
-fn normalized_base_url(
-    cli_ollama_url: &str,
-    provider_name: ProviderKind,
-    base_url: Option<String>,
-) -> Option<String> {
-    match provider_name {
-        ProviderKind::Ollama => Some(ensure_openai_v1(
-            base_url.as_deref().unwrap_or(cli_ollama_url),
-        )),
-        ProviderKind::Openai => Some(ensure_openai_v1(
-            base_url.as_deref().unwrap_or("https://api.openai.com"),
-        )),
-        _ => base_url,
-    }
-}
-
-/// async-openai appends `/chat/completions` to the base URL, so Ollama/OpenAI
-/// endpoints need a `/v1` suffix. Append it if missing.
-fn ensure_openai_v1(url: &str) -> String {
-    let trimmed = url.trim_end_matches('/');
-    if trimmed.ends_with("/v1") {
-        trimmed.to_string()
-    } else {
-        format!("{}/v1", trimmed)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Ollama availability check + auto-start
-// ---------------------------------------------------------------------------
-
-/// Parse host and port from an Ollama URL (e.g. "http://localhost:11434").
-fn parse_ollama_addr(url: &str) -> (String, u16) {
-    let without_scheme = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .unwrap_or(url);
-    let without_path = without_scheme.split('/').next().unwrap_or(without_scheme);
-    if let Some((host, port_str)) = without_path.rsplit_once(':') {
-        let port = port_str.parse().unwrap_or(11434);
-        (host.to_string(), port)
-    } else {
-        (without_path.to_string(), 11434)
-    }
-}
-
-/// Check if Ollama is listening on the given URL.
-fn is_ollama_reachable(url: &str) -> bool {
-    let (host, port) = parse_ollama_addr(url);
-    let addr = format!("{}:{}", host, port);
-    std::net::TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], port))),
-        std::time::Duration::from_secs(2),
-    )
-    .is_ok()
-}
-
-/// Ensure Ollama is running. If not, offer to start it (interactive mode)
-/// or return an error (non-interactive).
-pub fn ensure_ollama(url: &str, interactive: bool) -> Result<()> {
-    if is_ollama_reachable(url) {
-        return Ok(());
-    }
-
-    if !interactive {
-        anyhow::bail!(
-            "Ollama is not running at {}. Start it with `ollama serve` and try again.",
-            url
-        );
-    }
-
-    eprint!(
-        "Ollama is not running at {}. Start it automatically? [Y/n] ",
-        url
-    );
-    std::io::Write::flush(&mut std::io::stderr())?;
-
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    let answer = answer.trim().to_lowercase();
-    if !answer.is_empty() && answer != "y" && answer != "yes" {
-        anyhow::bail!("Ollama is required. Start it with `ollama serve` and try again.");
-    }
-
-    eprintln!("Starting Ollama...");
-    let child = std::process::Command::new("ollama")
-        .arg("serve")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-
-    match child {
-        Ok(_) => {
-            // Wait for Ollama to become available (up to 15 seconds)
-            for i in 0..30 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                if is_ollama_reachable(url) {
-                    eprintln!("Ollama is ready. (took ~{}s)", (i + 1) / 2);
-                    return Ok(());
-                }
-            }
-            anyhow::bail!("Ollama was started but did not become reachable within 15 seconds.")
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            anyhow::bail!(
-                "Could not find `ollama` in PATH. \
-                 Install it from https://ollama.com and try again."
-            )
-        }
-        Err(e) => {
-            anyhow::bail!("Failed to start Ollama: {}", e)
-        }
     }
 }

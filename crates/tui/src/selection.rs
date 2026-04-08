@@ -1,0 +1,631 @@
+use super::*;
+
+impl TuiApp {
+    pub(crate) fn show_aux_panel(&mut self, title: impl Into<String>, body: impl Into<String>) {
+        self.aux_panel = Some(AuxPanel {
+            title: title.into(),
+            content: AuxPanelContent::Text(body.into()),
+        });
+        self.aux_panel_selection = 0;
+    }
+
+    pub(crate) fn show_session_panel(&mut self, sessions: Vec<SessionListEntry>) {
+        self.aux_panel_selection = sessions
+            .iter()
+            .position(|session| session.is_active)
+            .unwrap_or(0);
+        self.aux_panel = Some(AuxPanel {
+            title: "Sessions".to_string(),
+            content: AuxPanelContent::SessionList(sessions),
+        });
+    }
+
+    pub(crate) fn show_model_switch_panel(&mut self) {
+        let entries = self.model_switch_entries();
+        self.aux_panel_selection = entries
+            .iter()
+            .position(|entry| entry.is_current)
+            .unwrap_or(0);
+        self.aux_panel = Some(AuxPanel {
+            title: "Models".to_string(),
+            content: AuxPanelContent::ModelList(entries),
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn show_model_panel(&mut self) {
+        self.show_onboarding_model_panel();
+    }
+
+    pub(crate) fn show_onboarding_model_panel(&mut self) {
+        let entries = self.onboarding_model_picker_entries();
+        self.aux_panel_selection = entries
+            .iter()
+            .position(|entry| entry.is_current)
+            .unwrap_or(0);
+        self.aux_panel = Some(AuxPanel {
+            title: String::new(),
+            content: AuxPanelContent::ModelList(entries),
+        });
+    }
+
+    pub(crate) fn model_switch_entries(&self) -> Vec<ModelListEntry> {
+        let mut entries = self
+            .saved_models
+            .iter()
+            .map(|model| ModelListEntry {
+                slug: model.model.clone(),
+                display_name: model.model.clone(),
+                provider: self.provider,
+                description: model
+                    .base_url
+                    .as_ref()
+                    .map(|base_url| format!("saved model from {base_url}")),
+                is_current: model.model == self.model,
+                is_builtin: false,
+                is_custom_mode: false,
+            })
+            .collect::<Vec<_>>();
+
+        if entries.is_empty() {
+            entries.push(ModelListEntry {
+                slug: self.model.clone(),
+                display_name: self.model.clone(),
+                provider: self.provider,
+                description: Some("current model".to_string()),
+                is_current: true,
+                is_builtin: false,
+                is_custom_mode: false,
+            });
+        }
+
+        if !entries.iter().any(|entry| entry.is_current) {
+            entries.insert(
+                0,
+                ModelListEntry {
+                    slug: self.model.clone(),
+                    display_name: self.model.clone(),
+                    provider: self.provider,
+                    description: Some("current model".to_string()),
+                    is_current: true,
+                    is_builtin: false,
+                    is_custom_mode: false,
+                },
+            );
+        }
+
+        entries.push(ModelListEntry {
+            slug: "__add_model__".to_string(),
+            display_name: "Add model".to_string(),
+            provider: self.provider,
+            description: Some("Open onboarding to add another model".to_string()),
+            is_current: false,
+            is_builtin: false,
+            is_custom_mode: true,
+        });
+        entries
+    }
+
+    pub(crate) fn onboarding_model_picker_entries(&self) -> Vec<ModelListEntry> {
+        let mut entries = Vec::new();
+        let onboarding_provider = self.show_model_onboarding.then_some(self.provider);
+
+        for model in self.model_catalog.list_visible() {
+            if onboarding_provider.is_some_and(|provider| model.provider != provider) {
+                continue;
+            }
+            entries.push(ModelListEntry {
+                slug: model.slug.clone(),
+                display_name: model.display_name.clone(),
+                provider: model.provider,
+                description: model.description.clone(),
+                is_current: model.slug == self.model,
+                is_builtin: true,
+                is_custom_mode: false,
+            });
+        }
+
+        if !self.show_model_onboarding && !entries.iter().any(|entry| entry.slug == self.model) {
+            entries.insert(
+                0,
+                ModelListEntry {
+                    slug: self.model.clone(),
+                    display_name: self.model.clone(),
+                    provider: self.provider,
+                    description: Some("current model".to_string()),
+                    is_current: true,
+                    is_builtin: false,
+                    is_custom_mode: false,
+                },
+            );
+        }
+
+        if self.show_model_onboarding {
+            entries.push(ModelListEntry {
+                slug: "__custom__".to_string(),
+                display_name: "Custom model".to_string(),
+                provider: self.provider,
+                description: Some("enter a model name manually".to_string()),
+                is_current: false,
+                is_builtin: false,
+                is_custom_mode: true,
+            });
+        }
+
+        if entries.is_empty() {
+            entries.push(ModelListEntry {
+                slug: self.model.clone(),
+                display_name: self.model.clone(),
+                provider: self.provider,
+                description: Some("current model".to_string()),
+                is_current: true,
+                is_builtin: false,
+                is_custom_mode: false,
+            });
+        }
+
+        entries
+    }
+
+    pub(crate) fn set_model(&mut self, model: String) -> Result<()> {
+        self.worker.set_model(model.clone())?;
+        self.model = model;
+        Ok(())
+    }
+
+    pub(crate) fn reconfigure_saved_model(
+        &mut self,
+        model: String,
+        base_url: Option<String>,
+        api_key: Option<String>,
+    ) -> Result<()> {
+        if base_url.is_none() && api_key.is_none() {
+            self.set_model(model)
+        } else {
+            self.worker
+                .reconfigure_provider(model.clone(), base_url, api_key)?;
+            self.model = model;
+            Ok(())
+        }
+    }
+
+    pub(crate) fn saved_model_entry(&self, model: &str) -> Option<&SavedModelEntry> {
+        self.saved_models.iter().find(|entry| entry.model == model)
+    }
+
+    pub(crate) fn handle_slash_command(&mut self, prompt: String) -> Result<()> {
+        let trimmed = prompt.trim();
+        let mut parts = trimmed.splitn(2, char::is_whitespace);
+        let command = parts.next().unwrap_or_default();
+        let argument = parts.next().map(str::trim).unwrap_or_default();
+
+        // Slash commands update local UI immediately, and only call the worker when
+        // the command needs server-side state to change.
+        match command {
+            "/exit" => {
+                self.push_item(
+                    TranscriptItemKind::System,
+                    "Command",
+                    "Exiting interactive session",
+                );
+                self.status_message = "Exiting".to_string();
+                self.should_quit = true;
+                Ok(())
+            }
+            "/status" => {
+                self.show_aux_panel(
+                    "Status",
+                    format!(
+                        "turns: {}\nmodel: {}\ntokens: {} in / {} out\nbusy: {}",
+                        self.turn_count,
+                        self.model,
+                        self.total_input_tokens,
+                        self.total_output_tokens,
+                        self.busy
+                    ),
+                );
+                self.status_message = "Session status shown".to_string();
+                Ok(())
+            }
+            "/onboard" => {
+                self.start_onboarding();
+                Ok(())
+            }
+            "/sessions" => {
+                self.worker.list_sessions()?;
+                self.status_message = "Loading sessions".to_string();
+                Ok(())
+            }
+            "/new" => {
+                self.worker.start_new_session()?;
+                self.aux_panel = None;
+                self.aux_panel_selection = 0;
+                self.status_message = "New session ready; send a prompt to start it".to_string();
+                Ok(())
+            }
+            "/rename" => {
+                if argument.is_empty() {
+                    anyhow::bail!("usage: /rename <new title>");
+                }
+                self.worker.rename_session(argument.to_string())?;
+                self.status_message = "Renaming current session".to_string();
+                Ok(())
+            }
+            "/session" => {
+                if argument.is_empty() || argument == "list" {
+                    self.worker.list_sessions()?;
+                    self.status_message = "Loading sessions".to_string();
+                    return Ok(());
+                }
+
+                let mut session_parts = argument.splitn(2, char::is_whitespace);
+                let subcommand = session_parts.next().unwrap_or_default();
+                let rest = session_parts.next().map(str::trim).unwrap_or_default();
+
+                match subcommand {
+                    "new" => {
+                        self.worker.start_new_session()?;
+                        self.aux_panel = None;
+                        self.aux_panel_selection = 0;
+                        self.status_message =
+                            "New session ready; send a prompt to start it".to_string();
+                        Ok(())
+                    }
+                    "rename" => {
+                        if rest.is_empty() {
+                            anyhow::bail!("usage: /session rename <new title>");
+                        }
+                        self.worker.rename_session(rest.to_string())?;
+                        self.status_message = "Renaming current session".to_string();
+                        Ok(())
+                    }
+                    "switch" => {
+                        if rest.is_empty() {
+                            anyhow::bail!("usage: /session switch <session_id>");
+                        }
+                        let session_id = rest.parse::<SessionId>().map_err(|error| {
+                            anyhow::anyhow!("invalid session id `{rest}`: {error}")
+                        })?;
+                        self.worker.switch_session(session_id)?;
+                        self.status_message = format!("Switching to session {rest}");
+                        Ok(())
+                    }
+                    _ => {
+                        let session_id = argument.parse::<SessionId>().map_err(|error| {
+                            anyhow::anyhow!("invalid session command `{argument}`: {error}")
+                        })?;
+                        self.worker.switch_session(session_id)?;
+                        self.status_message = format!("Switching to session {argument}");
+                        Ok(())
+                    }
+                }
+            }
+            "/model" => {
+                if argument.is_empty() {
+                    self.show_model_switch_panel();
+                    self.status_message = "Model switcher shown".to_string();
+                    return Ok(());
+                }
+
+                if let Some(model) = self
+                    .saved_models
+                    .iter()
+                    .find(|entry| entry.model == argument)
+                    .cloned()
+                {
+                    self.reconfigure_saved_model(model.model, model.base_url, model.api_key)?;
+                } else {
+                    self.set_model(argument.to_string())?;
+                }
+                self.aux_panel = None;
+                self.aux_panel_selection = 0;
+                self.status_message = format!("Model set to {}", self.model);
+                Ok(())
+            }
+            _ => self.submit_prompt(prompt),
+        }
+    }
+
+    pub(crate) fn slash_suggestions(&self) -> Vec<SlashCommandSpec> {
+        matching_slash_commands(self.input.text())
+    }
+
+    pub(crate) fn has_slash_suggestions(&self) -> bool {
+        !self.slash_suggestions().is_empty()
+    }
+
+    pub(crate) fn has_selectable_aux_panel(&self) -> bool {
+        matches!(
+            self.aux_panel.as_ref().map(|panel| &panel.content),
+            Some(AuxPanelContent::SessionList(_) | AuxPanelContent::ModelList(_))
+        )
+    }
+
+    pub(crate) fn is_onboarding_model_picker_open(&self) -> bool {
+        self.show_model_onboarding
+            && matches!(
+                self.aux_panel.as_ref().map(|panel| &panel.content),
+                Some(AuxPanelContent::ModelList(_))
+            )
+    }
+
+    pub(crate) fn begin_custom_model_onboarding(&mut self) {
+        self.aux_panel = None;
+        self.aux_panel_selection = 0;
+        self.onboarding_custom_model_pending = true;
+        self.onboarding_base_url_pending = false;
+        self.onboarding_api_key_pending = false;
+        self.onboarding_selected_model = None;
+        self.onboarding_selected_model_is_custom = true;
+        self.onboarding_selected_base_url = None;
+        self.onboarding_selected_api_key = None;
+        self.onboarding_prompt = Some("model name".to_string());
+        self.status_message.clear();
+        self.input.clear();
+    }
+
+    pub(crate) fn begin_model_credentials_onboarding(&mut self, model: String) {
+        self.aux_panel = None;
+        self.aux_panel_selection = 0;
+        self.onboarding_custom_model_pending = false;
+        self.onboarding_base_url_pending = true;
+        self.onboarding_api_key_pending = false;
+        self.onboarding_selected_model = Some(model);
+        self.onboarding_selected_model_is_custom = false;
+        self.onboarding_selected_base_url = None;
+        self.onboarding_selected_api_key = None;
+        self.onboarding_prompt = Some("base url".to_string());
+        self.status_message.clear();
+        self.input.clear();
+    }
+
+    pub(crate) fn exit_onboarding(&mut self) {
+        self.show_model_onboarding = false;
+        self.aux_panel = None;
+        self.aux_panel_selection = 0;
+        self.onboarding_custom_model_pending = false;
+        self.onboarding_prompt = None;
+        self.onboarding_prompt_history.clear();
+        self.onboarding_base_url_pending = false;
+        self.onboarding_api_key_pending = false;
+        self.onboarding_selected_model = None;
+        self.onboarding_selected_model_is_custom = false;
+        self.onboarding_selected_base_url = None;
+        self.onboarding_selected_api_key = None;
+        self.input.clear();
+        self.status_message = "Onboarding dismissed".to_string();
+    }
+
+    pub(crate) fn start_onboarding(&mut self) {
+        self.show_model_onboarding = true;
+        self.aux_panel = None;
+        self.aux_panel_selection = 0;
+        self.onboarding_custom_model_pending = false;
+        self.onboarding_prompt = None;
+        self.onboarding_prompt_history.clear();
+        self.onboarding_base_url_pending = false;
+        self.onboarding_api_key_pending = false;
+        self.onboarding_selected_model = None;
+        self.onboarding_selected_model_is_custom = false;
+        self.onboarding_selected_base_url = None;
+        self.onboarding_selected_api_key = None;
+        self.input.clear();
+        self.show_onboarding_model_panel();
+        self.status_message = "Onboarding started".to_string();
+    }
+
+    pub(crate) fn handle_escape(&mut self) -> bool {
+        if self.onboarding_api_key_pending {
+            self.onboarding_api_key_pending = false;
+            self.onboarding_prompt = Some("base url".to_string());
+            self.input.clear();
+            return true;
+        }
+        if self.onboarding_base_url_pending {
+            self.onboarding_base_url_pending = false;
+            self.onboarding_selected_base_url = None;
+            self.input.clear();
+            if self.onboarding_selected_model_is_custom {
+                self.onboarding_custom_model_pending = true;
+                self.onboarding_prompt = Some("model name".to_string());
+            } else {
+                self.onboarding_prompt = None;
+                self.show_onboarding_model_panel();
+            }
+            return true;
+        }
+        if self.onboarding_custom_model_pending {
+            self.onboarding_custom_model_pending = false;
+            self.onboarding_selected_model = None;
+            self.onboarding_selected_model_is_custom = false;
+            self.onboarding_prompt = None;
+            self.input.clear();
+            self.show_onboarding_model_panel();
+            return true;
+        }
+        if self.is_onboarding_model_picker_open() {
+            self.exit_onboarding();
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn reset_slash_selection(&mut self) {
+        self.slash_selection = 0;
+    }
+
+    pub(crate) fn move_slash_selection(&mut self, delta: isize) {
+        let suggestions = self.slash_suggestions();
+        if suggestions.is_empty() {
+            self.slash_selection = 0;
+            return;
+        }
+        let len = suggestions.len() as isize;
+        let next = (self.slash_selection as isize + delta).rem_euclid(len);
+        self.slash_selection = next as usize;
+    }
+
+    pub(crate) fn try_apply_slash_suggestion(&mut self) -> bool {
+        let suggestions = self.slash_suggestions();
+        if suggestions.is_empty() {
+            return false;
+        }
+        let selected = suggestions[self.slash_selection.min(suggestions.len() - 1)];
+        self.input.replace(selected.name);
+        self.reset_slash_selection();
+        true
+    }
+
+    pub(crate) fn move_aux_panel_selection(&mut self, delta: isize) {
+        let len = self
+            .aux_panel
+            .as_ref()
+            .map(|panel| match &panel.content {
+                AuxPanelContent::SessionList(sessions) => sessions.len(),
+                AuxPanelContent::ModelList(models) => models.len(),
+                AuxPanelContent::Text(_) => 0,
+            })
+            .unwrap_or(0);
+        if len == 0 {
+            self.aux_panel_selection = 0;
+            return;
+        }
+
+        let len = len as isize;
+        let next = (self.aux_panel_selection as isize + delta).rem_euclid(len);
+        self.aux_panel_selection = next as usize;
+    }
+
+    pub(crate) fn try_accept_aux_panel_selection(&mut self) -> bool {
+        let Some(panel) = self.aux_panel.as_ref() else {
+            return false;
+        };
+        if !self.input.is_blank() {
+            return false;
+        }
+
+        // Session and model pickers are only actionable when the composer is empty,
+        // which prevents accidental selection while the user is typing a prompt.
+        match &panel.content {
+            AuxPanelContent::SessionList(sessions) => {
+                if sessions.is_empty() {
+                    return false;
+                }
+                let selected =
+                    sessions[self.aux_panel_selection.min(sessions.len() - 1)].session_id;
+                if let Err(error) = self.worker.switch_session(selected) {
+                    self.push_item(
+                        TranscriptItemKind::Error,
+                        "Switch failed",
+                        error.to_string(),
+                    );
+                    self.status_message = "Failed to switch session".to_string();
+                } else {
+                    self.status_message = format!("Switching to session {selected}");
+                }
+                true
+            }
+            AuxPanelContent::ModelList(models) => {
+                if models.is_empty() {
+                    return false;
+                }
+                let selected = models[self.aux_panel_selection.min(models.len() - 1)].clone();
+                if selected.is_custom_mode {
+                    if self.show_model_onboarding {
+                        self.begin_custom_model_onboarding();
+                    } else {
+                        self.start_onboarding();
+                    }
+                    return true;
+                }
+                // Only an exact saved model slug should bypass onboarding.
+                // Having other entries in config.toml must not suppress the
+                // connection setup for a newly selected model.
+                if self.show_model_onboarding && self.saved_model_entry(&selected.slug).is_none() {
+                    self.begin_model_credentials_onboarding(selected.slug.clone());
+                    return true;
+                }
+                let Some(saved_model) = self.saved_model_entry(&selected.slug).cloned() else {
+                    if let Err(error) = self.set_model(selected.slug.clone()) {
+                        self.push_item(
+                            TranscriptItemKind::Error,
+                            "Model switch failed",
+                            error.to_string(),
+                        );
+                        self.status_message = "Failed to switch model".to_string();
+                    } else {
+                        self.status_message = format!("Model set to {}", self.model);
+                    }
+                    self.aux_panel = None;
+                    self.aux_panel_selection = 0;
+                    return true;
+                };
+                self.aux_panel = None;
+                self.aux_panel_selection = 0;
+                self.onboarding_custom_model_pending = false;
+                self.onboarding_selected_model_is_custom = false;
+                self.onboarding_base_url_pending = false;
+                self.onboarding_api_key_pending = false;
+                self.onboarding_selected_model = None;
+                self.onboarding_selected_base_url = None;
+                self.onboarding_selected_api_key = None;
+                self.onboarding_prompt = None;
+                if let Err(error) = self.reconfigure_saved_model(
+                    saved_model.model.clone(),
+                    saved_model.base_url.clone(),
+                    saved_model.api_key.clone(),
+                ) {
+                    self.push_item(
+                        TranscriptItemKind::Error,
+                        "Model switch failed",
+                        error.to_string(),
+                    );
+                    self.status_message = "Failed to switch model".to_string();
+                } else {
+                    self.status_message = format!("Model set to {}", self.model);
+                }
+                true
+            }
+            AuxPanelContent::Text(_) => false,
+        }
+    }
+
+    pub(crate) fn finish_onboarding_selection(&mut self) -> Result<()> {
+        let Some(model) = self.onboarding_selected_model.take() else {
+            return Ok(());
+        };
+        let base_url = self.onboarding_selected_base_url.take();
+        let api_key = self.onboarding_selected_api_key.take();
+
+        // Persist the choice first, then reconfigure the worker so the live session
+        // immediately reflects the onboarding selection.
+        save_onboarding_config(
+            self.provider,
+            &model,
+            base_url.as_deref(),
+            api_key.as_deref(),
+        )?;
+        self.worker
+            .reconfigure_provider(model.clone(), base_url, api_key)?;
+        self.model = model.clone();
+        self.aux_panel = None;
+        self.aux_panel_selection = 0;
+        self.onboarding_custom_model_pending = false;
+        self.onboarding_selected_model_is_custom = false;
+        self.onboarding_prompt = None;
+        self.onboarding_prompt_history.clear();
+        self.onboarding_base_url_pending = false;
+        self.onboarding_api_key_pending = false;
+        self.status_message = format!("Onboarding complete. Model set to {model}");
+        if self.show_model_onboarding && !self.onboarding_announced {
+            self.push_item(
+                TranscriptItemKind::System,
+                "Onboarding",
+                "Onboarding complete. Run `clawcr onboard` any time to revisit builtin models.",
+            );
+            self.onboarding_announced = true;
+            self.show_model_onboarding = false;
+        }
+        Ok(())
+    }
+}

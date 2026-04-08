@@ -34,6 +34,17 @@ pub(crate) struct ModelListEntry {
     pub is_custom_mode: bool,
 }
 
+/// One persisted model profile available for switching in the interactive model picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedModelEntry {
+    /// Stable model slug or custom model name.
+    pub model: String,
+    /// Optional provider base URL override stored with the model.
+    pub base_url: Option<String>,
+    /// Optional API key override stored with the model.
+    pub api_key: Option<String>,
+}
+
 /// One event emitted by the background query worker into the interactive UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkerEvent {
@@ -79,6 +90,16 @@ pub(crate) enum WorkerEvent {
         /// Total output tokens accumulated in the session.
         total_output_tokens: usize,
     },
+    /// Provider validation succeeded during onboarding.
+    ProviderValidationSucceeded {
+        /// Short human-readable confirmation from the probe request.
+        reply_preview: String,
+    },
+    /// Provider validation failed during onboarding.
+    ProviderValidationFailed {
+        /// Human-readable failure reason from the probe request.
+        message: String,
+    },
     /// Current known sessions were listed from the server.
     SessionsListed {
         /// Structured sessions rendered into the bottom picker panel.
@@ -94,6 +115,10 @@ pub(crate) enum WorkerEvent {
         title: Option<String>,
         /// The model restored from the resumed session, when one exists.
         model: Option<String>,
+        /// Total input tokens accumulated for the resumed session.
+        total_input_tokens: usize,
+        /// Total output tokens accumulated for the resumed session.
+        total_output_tokens: usize,
         /// Replay-friendly transcript items loaded from the resumed session.
         history_items: Vec<TranscriptItem>,
         /// Number of persisted items loaded for the resumed session.

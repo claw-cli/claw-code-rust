@@ -148,6 +148,8 @@ impl SessionProjector for DefaultProjection {
             title_state: session.title_state.clone(),
             ephemeral,
             resolved_model: session.model.clone(),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
             status,
         }
     }
@@ -163,6 +165,7 @@ impl TurnProjector for DefaultProjection {
             model_slug: turn.model_slug.clone(),
             started_at: turn.started_at,
             completed_at: turn.completed_at,
+            usage: turn.usage.clone(),
         }
     }
 }

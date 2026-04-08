@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use clawcr_core::{ItemId, SessionId, TurnId, TurnStatus};
+use clawcr_core::{ItemId, SessionId, TurnId, TurnStatus, TurnUsage};
 use serde::{Deserialize, Serialize};
 
 /// Stores one turn summary projected onto the server API.
@@ -22,6 +22,8 @@ pub struct TurnSummary {
     pub started_at: DateTime<Utc>,
     /// The time when the turn completed, if it has reached a terminal state.
     pub completed_at: Option<DateTime<Utc>>,
+    /// The authoritative provider usage for this turn, when available.
+    pub usage: Option<TurnUsage>,
 }
 
 /// Describes an input item accepted by the runtime API.

@@ -67,6 +67,8 @@ pub(crate) struct ManagedTerminal {
 impl ManagedTerminal {
     /// Enters raw mode and the alternate screen before constructing the backend.
     pub(crate) fn new() -> io::Result<Self> {
+        // This wrapper centralizes terminal setup so cleanup happens reliably even
+        // when the TUI exits early or panics.
         let mut stdout = io::stdout();
         terminal::enable_raw_mode()?;
         execute!(stdout, EnterAlternateScreen, Hide)?;
@@ -88,6 +90,8 @@ impl ManagedTerminal {
 
     /// Restores the terminal to normal mode.
     pub(crate) fn restore(&mut self) -> io::Result<()> {
+        // Drop back to the original terminal state before returning control to the
+        // shell and show the cursor again for non-TUI workflows.
         terminal::disable_raw_mode()?;
         execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen)?;
         self.terminal.show_cursor()?;

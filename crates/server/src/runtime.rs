@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use clawcr_core::{
     query, ItemId, Message, QueryEvent, SessionId, SessionTitleFinalSource, SessionTitleState,
-    TextItem, ToolCallItem, ToolResultItem, TurnId, TurnItem, TurnStatus, Worklog,
+    TextItem, ToolCallItem, ToolResultItem, TurnId, TurnItem, TurnStatus, TurnUsage, Worklog,
 };
 use clawcr_tools::ToolOrchestrator;
 
@@ -235,6 +235,8 @@ impl ServerRuntime {
                 .unwrap_or(SessionTitleState::Unset),
             ephemeral: params.ephemeral,
             resolved_model: Some(resolved_model.clone()),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
             status: SessionRuntimeStatus::Idle,
         };
         if let Some(record) = &record {
@@ -474,6 +476,8 @@ impl ServerRuntime {
             title_state: source.summary.title_state.clone(),
             ephemeral: source.summary.ephemeral,
             resolved_model: Some(fork_model.clone()),
+            total_input_tokens: source_core_session.total_input_tokens,
+            total_output_tokens: source_core_session.total_output_tokens,
             status: SessionRuntimeStatus::Idle,
         };
         let mut core_session = self
@@ -622,6 +626,7 @@ impl ServerRuntime {
                     .unwrap_or_else(|| self.deps.default_model.clone()),
                 started_at: now,
                 completed_at: None,
+                usage: None,
             };
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
@@ -727,6 +732,16 @@ impl ServerRuntime {
             session.latest_turn = Some(turn.clone());
             session.summary.status = SessionRuntimeStatus::Idle;
             session.summary.updated_at = Utc::now();
+            let totals = session.core_session.try_lock().ok().map(|core_session| {
+                (
+                    core_session.total_input_tokens,
+                    core_session.total_output_tokens,
+                )
+            });
+            if let Some((total_input_tokens, total_output_tokens)) = totals {
+                session.summary.total_input_tokens = total_input_tokens;
+                session.summary.total_output_tokens = total_output_tokens;
+            }
             turn
         };
         if let Some(record) = session_arc.lock().await.record.clone() {
@@ -900,6 +915,7 @@ impl ServerRuntime {
             let mut assistant_item_id = None;
             let mut assistant_item_seq = None;
             let mut assistant_text = String::new();
+            let mut latest_usage: Option<TurnUsage> = None;
             while let Some(event) = event_rx.recv().await {
                 match event {
                     QueryEvent::TextDelta(text) => {
@@ -1002,7 +1018,22 @@ impl ServerRuntime {
                             )
                             .await;
                     }
-                    QueryEvent::Usage { .. } | QueryEvent::TurnComplete { .. } => {}
+                    QueryEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens,
+                    } => {
+                        latest_usage = Some(TurnUsage {
+                            input_tokens: input_tokens as u32,
+                            output_tokens: output_tokens as u32,
+                            cache_creation_input_tokens: cache_creation_input_tokens
+                                .map(|value| value as u32),
+                            cache_read_input_tokens: cache_read_input_tokens
+                                .map(|value| value as u32),
+                        });
+                    }
+                    QueryEvent::TurnComplete { .. } => {}
                 }
             }
             if let (Some(item_id), Some(item_seq)) = (assistant_item_id, assistant_item_seq) {
@@ -1020,9 +1051,15 @@ impl ServerRuntime {
                     )
                     .await;
             }
+            latest_usage
         });
 
-        let (result, first_assistant_reply) = {
+        let (
+            result,
+            first_assistant_reply,
+            session_total_input_tokens,
+            session_total_output_tokens,
+        ) = {
             let core_session = {
                 let session = session_arc.lock().await;
                 Arc::clone(&session.core_session)
@@ -1057,10 +1094,15 @@ impl ServerRuntime {
                     .collect::<String>();
                 (!text.trim().is_empty()).then_some(text)
             });
-            (result, first_assistant_reply)
+            (
+                result,
+                first_assistant_reply,
+                core_session.total_input_tokens,
+                core_session.total_output_tokens,
+            )
         };
         drop(event_tx);
-        let _ = event_task.await;
+        let latest_usage = event_task.await.ok().flatten();
         self.active_tasks.lock().await.remove(&session_id);
 
         let final_turn = {
@@ -1072,11 +1114,14 @@ impl ServerRuntime {
             } else {
                 TurnStatus::Failed
             };
+            final_turn.usage = latest_usage.clone();
             session.latest_turn = Some(final_turn.clone());
             session.active_turn = None;
             session.active_task = None;
             session.summary.status = SessionRuntimeStatus::Idle;
             session.summary.updated_at = Utc::now();
+            session.summary.total_input_tokens = session_total_input_tokens;
+            session.summary.total_output_tokens = session_total_output_tokens;
             final_turn
         };
         if let Some(record) = session_arc.lock().await.record.clone() {

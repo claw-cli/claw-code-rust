@@ -104,14 +104,27 @@ impl InputBuffer {
         self.layout(full_width).cursor
     }
 
+    /// Returns the rendered cursor position for a wrapped text area with a prompt prefix.
+    pub(crate) fn visual_cursor_with_prompt(
+        &self,
+        full_width: u16,
+        prompt: Option<&str>,
+    ) -> (u16, u16) {
+        self.layout_with_prompt(full_width, prompt).cursor
+    }
+
     /// Returns the fully wrapped visual lines used by the composer renderer.
     pub(crate) fn rendered_lines(&self, full_width: u16) -> Vec<String> {
         self.layout(full_width).lines
     }
 
-    /// Returns the number of visual lines needed to render the composer.
-    pub(crate) fn visual_line_count(&self, full_width: u16) -> u16 {
-        self.layout(full_width).lines.len() as u16
+    /// Returns the fully wrapped visual lines for a prompt-prefixed composer.
+    pub(crate) fn rendered_lines_with_prompt(
+        &self,
+        full_width: u16,
+        prompt: Option<&str>,
+    ) -> Vec<String> {
+        self.layout_with_prompt(full_width, prompt).lines
     }
 
     fn char_len(&self) -> usize {
@@ -127,16 +140,25 @@ impl InputBuffer {
     }
 
     fn layout(&self, full_width: u16) -> ComposerLayout {
+        self.layout_with_prompt(full_width, None)
+    }
+
+    fn layout_with_prompt(&self, full_width: u16, prompt: Option<&str>) -> ComposerLayout {
         let width_limit = usize::from(full_width.max(1));
+        let prompt_prefix = prompt.map(|value| format!("{value}> "));
+        let prompt_width = prompt_prefix
+            .as_deref()
+            .map(|value| unicode_width::UnicodeWidthStr::width(value) as usize)
+            .unwrap_or(2);
         let mut lines = Vec::new();
-        let mut current = String::from("> ");
-        let mut x = 2usize;
+        let mut current = prompt_prefix.clone().unwrap_or_else(|| String::from("> "));
+        let mut x = prompt_width;
         let mut y = 0usize;
         let mut chars_seen = 0usize;
-        let mut cursor = (2u16, 0u16);
+        let mut cursor = (prompt_width as u16, 0u16);
 
         if self.cursor_chars == 0 {
-            cursor = (2, 0);
+            cursor = (prompt_width as u16, 0);
         }
 
         for ch in self.text.chars() {
@@ -229,7 +251,7 @@ mod tests {
 
         assert_eq!(buffer.rendered_lines(4), vec!["> ab", "cdef", ""]);
         assert_eq!(buffer.visual_cursor(4), (0, 2));
-        assert_eq!(buffer.visual_line_count(4), 3);
+        assert_eq!(buffer.rendered_lines(4).len(), 3);
     }
 
     #[test]
@@ -239,7 +261,7 @@ mod tests {
 
         assert_eq!(buffer.rendered_lines(10), vec!["> a", "  bc"]);
         assert_eq!(buffer.visual_cursor(10), (4, 1));
-        assert_eq!(buffer.visual_line_count(10), 2);
+        assert_eq!(buffer.rendered_lines(10).len(), 2);
     }
 
     #[test]

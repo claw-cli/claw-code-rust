@@ -8,10 +8,14 @@ pub(crate) struct SlashCommandSpec {
 }
 
 /// Canonical slash commands supported by the interactive TUI.
-pub(crate) const SLASH_COMMANDS: [SlashCommandSpec; 6] = [
+pub(crate) const SLASH_COMMANDS: [SlashCommandSpec; 7] = [
     SlashCommandSpec {
         name: "/model",
         description: "Show or change the active model",
+    },
+    SlashCommandSpec {
+        name: "/onboard",
+        description: "Run the onboarding flow again",
     },
     SlashCommandSpec {
         name: "/new",
@@ -38,6 +42,8 @@ pub(crate) const SLASH_COMMANDS: [SlashCommandSpec; 6] = [
 /// Computes the visible slash-command suggestions for the current composer text.
 pub(crate) fn matching_slash_commands(input: &str) -> Vec<SlashCommandSpec> {
     let trimmed = input.trim_start();
+    // Suggestions only appear for a bare command prefix; once the user types a
+    // space, the input is treated as a normal prompt or a fully formed command.
     if !trimmed.starts_with('/') || trimmed.contains(char::is_whitespace) {
         return Vec::new();
     }

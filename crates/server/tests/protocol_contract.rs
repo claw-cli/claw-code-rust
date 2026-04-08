@@ -253,6 +253,8 @@ fn session_title_updated_event_serializes_expected_kind() {
             title_state: SessionTitleState::Final(SessionTitleFinalSource::UserRename),
             ephemeral: false,
             resolved_model: Some("claude-sonnet".into()),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
             status: SessionRuntimeStatus::Idle,
         },
     });

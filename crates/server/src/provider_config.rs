@@ -120,7 +120,7 @@ pub fn load_server_provider(
             }
         }
         ProviderKind::Ollama | ProviderKind::Openai => {
-            let base_url = ensure_openai_v1(&base_url.unwrap_or_else(|| {
+            let base_url = normalize_openai_base_url(&base_url.unwrap_or_else(|| {
                 if provider_name == ProviderKind::Ollama {
                     "http://localhost:11434".to_string()
                 } else {
@@ -388,11 +388,38 @@ fn env_non_empty(name: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-fn ensure_openai_v1(url: &str) -> String {
+fn normalize_openai_base_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
-    if trimmed.ends_with("/v1") {
+    let Some(scheme_sep) = trimmed.find("://") else {
+        return trimmed.to_string();
+    };
+    let has_explicit_path = trimmed[scheme_sep + 3..].contains('/');
+    if has_explicit_path {
         trimmed.to_string()
     } else {
         format!("{trimmed}/v1")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::normalize_openai_base_url;
+
+    #[test]
+    fn preserves_explicit_openai_compatible_paths() {
+        assert_eq!(
+            normalize_openai_base_url("https://open.bigmodel.cn/api/paas/v4/"),
+            "https://open.bigmodel.cn/api/paas/v4"
+        );
+    }
+
+    #[test]
+    fn appends_v1_for_bare_openai_hosts() {
+        assert_eq!(
+            normalize_openai_base_url("https://api.openai.com"),
+            "https://api.openai.com/v1"
+        );
     }
 }

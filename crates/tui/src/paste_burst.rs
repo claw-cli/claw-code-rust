@@ -19,6 +19,8 @@ impl PasteBurst {
     /// Records one plain character. Returns `true` when the caller should defer insertion because
     /// the character has been absorbed into the burst buffer.
     pub(crate) fn push_char(&mut self, ch: char, now: Instant) -> bool {
+        // A rapid second character turns the stream into burst mode; slower input
+        // falls back to normal per-key insertion.
         match self.last_key_at {
             None => {
                 self.last_key_at = Some(now);
@@ -57,6 +59,8 @@ impl PasteBurst {
 
     /// Drains the buffered paste text if either forced or the burst has gone idle.
     pub(crate) fn take_if_due(&mut self, now: Instant, force: bool) -> Option<String> {
+        // Forced flushes are used before control keys and on idle ticks, while the
+        // timed flush keeps pasted text grouped without needing bracketed paste.
         let due = force
             || self
                 .last_key_at

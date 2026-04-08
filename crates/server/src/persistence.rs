@@ -268,6 +268,7 @@ impl ReplayState {
                     model_slug: line.turn.model_slug.clone(),
                     started_at: line.turn.started_at,
                     completed_at: line.turn.completed_at,
+                    usage: line.turn.usage.clone(),
                 });
                 self.latest_turn = Some(line.turn);
             }
@@ -332,6 +333,8 @@ impl ReplayState {
             title_state: record.title_state.clone(),
             ephemeral: false,
             resolved_model: record.model.clone(),
+            total_input_tokens: self.total_input_tokens,
+            total_output_tokens: self.total_output_tokens,
             status: SessionRuntimeStatus::Idle,
         };
 
@@ -599,7 +602,7 @@ pub(crate) fn build_turn_record(turn: &TurnSummary) -> TurnRecord {
         status: turn.status.clone(),
         model_slug: turn.model_slug.clone(),
         input_token_estimate: None,
-        usage: None,
+        usage: turn.usage.clone(),
         schema_version: 1,
     }
 }

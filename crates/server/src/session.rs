@@ -41,6 +41,10 @@ pub struct SessionSummary {
     pub ephemeral: bool,
     /// The latest resolved model slug for the session.
     pub resolved_model: Option<String>,
+    /// The total provider-reported input tokens accumulated for the session.
+    pub total_input_tokens: usize,
+    /// The total provider-reported output tokens accumulated for the session.
+    pub total_output_tokens: usize,
     /// The current runtime status visible to API clients.
     pub status: SessionRuntimeStatus,
 }

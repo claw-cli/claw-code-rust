@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clawcr_core::ProviderKind;
-use clawcr_utils::current_user_config_file;
+use clawcr_utils::find_clawcr_home;
 use toml::Value;
 
 /// Persists the onboarding choice into the user's `config.toml`.
@@ -10,7 +10,9 @@ pub(crate) fn save_onboarding_config(
     base_url: Option<&str>,
     api_key: Option<&str>,
 ) -> Result<()> {
-    let path = current_user_config_file().context("could not determine user config path")?;
+    let path = find_clawcr_home()
+        .context("could not determine user config path")?
+        .join("config.toml");
     let mut root = if path.exists() {
         let data = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -38,6 +40,8 @@ fn merge_onboarding_config(
     base_url: Option<&str>,
     api_key: Option<&str>,
 ) -> Result<Value> {
+    // Preserve unrelated config keys while updating only the onboarding-selected
+    // provider profile.
     let table = root
         .as_table_mut()
         .context("config root must be a TOML table")?;
@@ -110,6 +114,8 @@ fn upsert_model_entry(
     base_url: Option<&str>,
     api_key: Option<&str>,
 ) {
+    // Keep exactly one entry per model slug so repeated onboarding runs replace
+    // the existing profile instead of appending duplicates.
     let mut entry = toml::map::Map::new();
     entry.insert("model".to_string(), Value::String(model.to_string()));
     if let Some(base_url) = base_url {

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use tokio::{
@@ -39,6 +39,12 @@ enum WorkerCommand {
         /// Optional provider base URL override.
         base_url: Option<String>,
         /// Optional provider API key override.
+        api_key: Option<String>,
+    },
+    /// Validates provider settings with a temporary probe request.
+    ValidateProvider {
+        model: String,
+        base_url: Option<String>,
         api_key: Option<String>,
     },
     /// Request a session list from the server.
@@ -101,6 +107,22 @@ impl QueryWorkerHandle {
     ) -> Result<()> {
         self.command_tx
             .send(WorkerCommand::ReconfigureProvider {
+                model,
+                base_url,
+                api_key,
+            })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    /// Validates provider settings with a temporary probe request.
+    pub(crate) fn validate_provider(
+        &self,
+        model: String,
+        base_url: Option<String>,
+        api_key: Option<String>,
+    ) -> Result<()> {
+        self.command_tx
+            .send(WorkerCommand::ValidateProvider {
                 model,
                 base_url,
                 api_key,
@@ -185,6 +207,8 @@ async fn run_worker_inner(
     command_rx: &mut mpsc::UnboundedReceiver<WorkerCommand>,
     event_tx: &mpsc::UnboundedSender<WorkerEvent>,
 ) -> Result<()> {
+    // The worker owns the server client and translates UI commands into server
+    // calls, then turns server notifications back into lightweight UI events.
     let mut server_env = config.server_env;
     let mut client = spawn_client(&config.cwd, server_env.clone()).await?;
     let _ = client.initialize().await?;
@@ -192,8 +216,9 @@ async fn run_worker_inner(
     let mut model = config.model;
     let mut active_turn_id: Option<TurnId> = None;
     let mut turn_count = 0usize;
-    let total_input_tokens = 0usize;
-    let total_output_tokens = 0usize;
+    let mut total_input_tokens = 0usize;
+    let mut total_output_tokens = 0usize;
+    let mut latest_completed_agent_message: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -231,11 +256,37 @@ async fn run_worker_inner(
                     Some(WorkerCommand::SetModel(next_model)) => {
                         model = next_model;
                     }
-                    Some(WorkerCommand::ReconfigureProvider {
+                    Some(WorkerCommand::ValidateProvider {
                         model: next_model,
                         base_url,
                         api_key,
                     }) => {
+                        match validate_provider_connection(
+                            &config.cwd,
+                            &server_env,
+                            &next_model,
+                            base_url,
+                            api_key,
+                        ).await {
+                            Ok(reply_preview) => {
+                                let _ = event_tx.send(WorkerEvent::ProviderValidationSucceeded {
+                                    reply_preview,
+                                });
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::ProviderValidationFailed {
+                                    message: error.to_string(),
+                                });
+                            }
+                        }
+                    }
+                Some(WorkerCommand::ReconfigureProvider {
+                    model: next_model,
+                    base_url,
+                    api_key,
+                }) => {
+                        // Recreate the client so new provider credentials take effect
+                        // without requiring the whole app to restart.
                         model = next_model;
                         apply_env_override(&mut server_env, "CLAWCR_MODEL", &model);
                         apply_optional_env_override(&mut server_env, "CLAWCR_BASE_URL", base_url);
@@ -299,9 +350,13 @@ async fn run_worker_inner(
                                     session_id: next_session_id.to_string(),
                                     title: result.session.title,
                                     model: result.session.resolved_model,
+                                    total_input_tokens: result.session.total_input_tokens,
+                                    total_output_tokens: result.session.total_output_tokens,
                                     history_items: project_history_items(&result.history_items),
                                     loaded_item_count: result.loaded_item_count,
                                 });
+                                total_input_tokens = result.session.total_input_tokens;
+                                total_output_tokens = result.session.total_output_tokens;
                             }
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
@@ -382,6 +437,7 @@ async fn run_worker_inner(
                                 if let ServerEvent::TurnStarted(payload) = event {
                                     active_turn_id = Some(payload.turn.turn_id);
                                 }
+                                latest_completed_agent_message = None;
                                 let _ = event_tx.send(WorkerEvent::TurnStarted);
                             }
                             "item/agentMessage/delta" => {
@@ -391,12 +447,21 @@ async fn run_worker_inner(
                             }
                             "item/completed" => {
                                 if let ServerEvent::ItemCompleted(payload) = event {
+                                    if let Some(text) = completed_agent_message_text(&payload) {
+                                        latest_completed_agent_message = Some(text);
+                                    }
+                                    // Completed tool items are mapped into compact UI events
+                                    // with pre-rendered summaries and previews.
                                     handle_completed_item(payload, event_tx);
                                 }
                             }
                             "turn/completed" => {
                                 if let ServerEvent::TurnCompleted(payload) = event {
                                     active_turn_id = None;
+                                    if let Some(usage) = &payload.turn.usage {
+                                        total_input_tokens += usage.input_tokens as usize;
+                                        total_output_tokens += usage.output_tokens as usize;
+                                    }
                                     let completed = payload.turn.status == TurnStatus::Completed
                                         || payload.turn.status == TurnStatus::Interrupted;
                                     if completed {
@@ -407,14 +472,22 @@ async fn run_worker_inner(
                                             total_input_tokens,
                                             total_output_tokens,
                                         });
+                                        latest_completed_agent_message = None;
                                     }
                                 }
                             }
                             "turn/failed" => {
                                 if let ServerEvent::TurnFailed(TurnEventPayload { turn, .. }) = event {
                                     active_turn_id = None;
+                                    if let Some(usage) = &turn.usage {
+                                        total_input_tokens += usage.input_tokens as usize;
+                                        total_output_tokens += usage.output_tokens as usize;
+                                    }
+                                    let message = latest_completed_agent_message
+                                        .take()
+                                        .unwrap_or_else(|| format!("turn failed with status {:?}", turn.status));
                                     let _ = event_tx.send(WorkerEvent::TurnFailed {
-                                        message: format!("turn failed with status {:?}", turn.status),
+                                        message,
                                         turn_count,
                                         total_input_tokens,
                                         total_output_tokens,
@@ -489,7 +562,26 @@ fn apply_optional_env_override(env: &mut Vec<(String, String)>, key: &str, value
     }
 }
 
+fn completed_agent_message_text(payload: &ItemEventPayload) -> Option<String> {
+    match &payload.item {
+        ItemEnvelope {
+            item_kind: ItemKind::AgentMessage,
+            payload,
+            ..
+        } => payload
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned),
+        _ => None,
+    }
+}
+
 fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSender<WorkerEvent>) {
+    // Only tool lifecycle items need special handling here; other item kinds are
+    // intentionally ignored because they are either streamed separately or not
+    // shown in the TUI transcript.
     match payload.item {
         ItemEnvelope {
             item_kind: ItemKind::ToolCall,
@@ -618,6 +710,89 @@ fn truncate_tool_output(content: &str) -> String {
     }
 }
 
+async fn validate_provider_connection(
+    cwd: &PathBuf,
+    server_env: &[(String, String)],
+    model: &str,
+    base_url: Option<String>,
+    api_key: Option<String>,
+) -> Result<String> {
+    let mut env = server_env.to_vec();
+    apply_env_override(&mut env, "CLAWCR_MODEL", model);
+    apply_optional_env_override(&mut env, "CLAWCR_BASE_URL", base_url);
+    apply_optional_env_override(&mut env, "CLAWCR_API_KEY", api_key);
+
+    let mut client = spawn_client(cwd, env).await?;
+    let result = async {
+        let _ = client.initialize().await?;
+        let session = client
+            .session_start(SessionStartParams {
+                cwd: cwd.clone(),
+                ephemeral: true,
+                title: None,
+                model: Some(model.to_string()),
+            })
+            .await?;
+        let _ = client
+            .turn_start(TurnStartParams {
+                session_id: session.session_id,
+                input: vec![InputItem::Text {
+                    text: "Reply with OK only.".to_string(),
+                }],
+                model: Some(model.to_string()),
+                sandbox: None,
+                approval_policy: None,
+                cwd: None,
+            })
+            .await?;
+
+        let mut reply_preview = String::new();
+        loop {
+            match client.recv_event().await? {
+                Some((method, event)) => match method.as_str() {
+                    "item/agentMessage/delta" => {
+                        if let ServerEvent::ItemDelta { payload, .. } = event {
+                            reply_preview.push_str(&payload.delta);
+                        }
+                    }
+                    "item/completed" => {
+                        if let ServerEvent::ItemCompleted(payload) = event {
+                            if let Some(text) = completed_agent_message_text(&payload) {
+                                if reply_preview.trim().is_empty() {
+                                    reply_preview = text;
+                                }
+                            }
+                        }
+                    }
+                    "turn/failed" => {
+                        let message = if reply_preview.trim().is_empty() {
+                            "provider validation failed".to_string()
+                        } else {
+                            reply_preview.trim().to_string()
+                        };
+                        anyhow::bail!("{message}");
+                    }
+                    "turn/completed" => {
+                        let preview = reply_preview.trim();
+                        if preview.is_empty() {
+                            anyhow::bail!("provider validation completed without a model reply");
+                        }
+                        return Ok(preview.to_string());
+                    }
+                    _ => {}
+                },
+                None => anyhow::bail!("provider validation connection closed unexpectedly"),
+            }
+        }
+    };
+
+    let outcome = tokio::time::timeout(Duration::from_secs(20), result)
+        .await
+        .context("provider validation timed out after 20s")?;
+    let _ = client.shutdown().await;
+    outcome
+}
+
 fn normalize_display_output(content: &str) -> String {
     content
         .replace("\r\n", "\n")
@@ -687,6 +862,8 @@ mod tests {
             title_state: SessionTitleState::Provisional,
             ephemeral: false,
             resolved_model: Some("test-model".to_string()),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
             status: SessionRuntimeStatus::Idle,
         };
         let entry = SessionListEntry {
@@ -714,6 +891,8 @@ mod tests {
             title_state: SessionTitleState::Provisional,
             ephemeral: false,
             resolved_model: Some("test-model".to_string()),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
             status: SessionRuntimeStatus::Idle,
         };
         let entry = SessionListEntry {
