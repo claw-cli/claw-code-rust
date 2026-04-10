@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -189,7 +189,7 @@ async fn handle_websocket_connection(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_listen_target, resolve_listen_targets, ListenTarget, DEFAULT_WEBSOCKET_BIND_ADDRESS,
+        DEFAULT_WEBSOCKET_BIND_ADDRESS, ListenTarget, parse_listen_target, resolve_listen_targets,
     };
 
     #[test]

@@ -1,12 +1,19 @@
 use super::*;
 use crate::events::ThinkingListEntry;
-use crate::onboarding_config::save_last_used_model;
+use crate::onboarding::save_last_used_model;
 use clawcr_core::SessionId;
 use clawcr_utils::find_clawcr_home;
 use std::io::{BufRead, BufReader};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 impl TuiApp {
+    fn emit_inline_command_echo(&mut self, command: &str) {
+        if self.inline_mode {
+            self.pending_inline_history
+                .push(crate::transcript::format_shell_command_echo(command));
+        }
+    }
+
     pub(crate) fn show_aux_panel(&mut self, title: impl Into<String>, body: impl Into<String>) {
         self.aux_panel = Some(AuxPanel {
             title: title.into(),
@@ -236,12 +243,14 @@ impl TuiApp {
         // the command needs server-side state to change.
         match command {
             "/exit" => {
+                self.emit_inline_command_echo(trimmed);
                 self.last_ctrl_c_at = None;
                 self.status_message = "Exiting".to_string();
                 self.should_quit = true;
                 Ok(())
             }
             "/status" => {
+                self.emit_inline_command_echo(trimmed);
                 self.show_aux_panel(
                     "Status",
                     format!(
@@ -257,25 +266,30 @@ impl TuiApp {
                 Ok(())
             }
             "/onboard" => {
+                self.emit_inline_command_echo(trimmed);
                 self.start_onboarding();
                 Ok(())
             }
             "/sessions" => {
+                self.emit_inline_command_echo(trimmed);
                 let sessions = local_session_entries().unwrap_or_default();
                 if sessions.is_empty() {
                     self.show_aux_panel("Sessions", "No sessions found");
                 } else {
                     self.show_session_panel(sessions);
                 }
+                self.status_message = "Listing sessions".to_string();
                 self.worker.list_sessions()?;
                 Ok(())
             }
             "/thinking" => {
+                self.emit_inline_command_echo(trimmed);
                 self.show_thinking_panel();
                 self.status_message = "Thinking options shown".to_string();
                 Ok(())
             }
             "/new" => {
+                self.emit_inline_command_echo(trimmed);
                 self.worker.start_new_session()?;
                 self.aux_panel = None;
                 self.aux_panel_selection = 0;
@@ -283,6 +297,7 @@ impl TuiApp {
                 Ok(())
             }
             "/rename" => {
+                self.emit_inline_command_echo(trimmed);
                 if argument.is_empty() {
                     anyhow::bail!("usage: /rename <new title>");
                 }
@@ -291,6 +306,7 @@ impl TuiApp {
                 Ok(())
             }
             "/session" => {
+                self.emit_inline_command_echo(trimmed);
                 if argument.is_empty() || argument == "list" {
                     let sessions = local_session_entries().unwrap_or_default();
                     if sessions.is_empty() {
@@ -298,6 +314,7 @@ impl TuiApp {
                     } else {
                         self.show_session_panel(sessions);
                     }
+                    self.status_message = "Listing sessions".to_string();
                     self.worker.list_sessions()?;
                     return Ok(());
                 }
@@ -345,6 +362,7 @@ impl TuiApp {
                 }
             }
             "/model" => {
+                self.emit_inline_command_echo(trimmed);
                 if argument.is_empty() {
                     self.show_model_switch_panel();
                     self.status_message = "Model switcher shown".to_string();

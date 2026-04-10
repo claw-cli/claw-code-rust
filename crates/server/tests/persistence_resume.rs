@@ -6,7 +6,7 @@ use futures::stream;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 use clawcr_core::BuiltinModelCatalog;
 use clawcr_provider::{
@@ -19,7 +19,7 @@ struct SingleReplyProvider;
 
 #[async_trait]
 impl ModelProvider for SingleReplyProvider {
-    async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
+    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
         Ok(ModelResponse {
             id: "title-1".into(),
             content: vec![ResponseContent::Text("Generated rollout title".to_string())],
@@ -28,7 +28,7 @@ impl ModelProvider for SingleReplyProvider {
         })
     }
 
-    async fn stream(
+    async fn completion_stream(
         &self,
         _request: ModelRequest,
     ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {

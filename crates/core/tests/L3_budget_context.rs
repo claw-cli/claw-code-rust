@@ -20,7 +20,7 @@ use clawcr_provider::{StopReason, Usage};
 use clawcr_safety::legacy_permissions::PermissionMode;
 use clawcr_tools::{ToolOrchestrator, ToolOutput, ToolRegistry};
 
-use clawcr_core::{query, ContentBlock, Message, SessionConfig, TokenBudget};
+use clawcr_core::{ContentBlock, Message, SessionConfig, TokenBudget, query};
 
 use harness::builders::*;
 use harness::{ScriptedProvider, SpyTool};

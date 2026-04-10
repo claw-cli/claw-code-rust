@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clawcr_core::ProviderKind;
 use serde::Deserialize;
 
-use clawcr_provider::{anthropic::AnthropicProvider, openai::OpenAIProvider, ModelProvider};
+use clawcr_provider::{ModelProvider, anthropic::AnthropicProvider, openai::OpenAIProvider};
 
 /// Resolved provider bootstrap owned by the server runtime.
 pub struct ResolvedServerProvider {

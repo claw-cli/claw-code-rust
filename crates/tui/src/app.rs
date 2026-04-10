@@ -16,11 +16,11 @@ use crate::{
         TranscriptItemKind, WorkerEvent,
     },
     input::InputBuffer,
-    onboarding_config::save_onboarding_config,
+    onboarding::save_onboarding_config,
     paste_burst::PasteBurst,
     render,
-    slash::{matching_slash_commands, SlashCommandSpec},
-    terminal::ManagedTerminal,
+    slash::{SlashCommandSpec, matching_slash_commands},
+    terminal::{ManagedTerminal, TerminalMode},
     worker::{QueryWorkerConfig, QueryWorkerHandle},
 };
 
@@ -133,6 +133,18 @@ pub(crate) struct TuiApp {
     pub(crate) paste_burst: PasteBurst,
     /// Whether the app should exit after the current loop iteration.
     pub(crate) should_quit: bool,
+    /// Whether the UI is rendering inline in the main terminal buffer.
+    pub(crate) inline_mode: bool,
+    /// Last known terminal width, used for inline transcript wrapping.
+    pub(crate) terminal_width: u16,
+    /// Whether an inline assistant stream is currently open.
+    pub(crate) inline_assistant_stream_open: bool,
+    /// Unflushed trailing assistant text for inline scrollback streaming.
+    pub(crate) inline_assistant_pending_line: String,
+    /// Whether the current inline assistant stream has already emitted its header.
+    pub(crate) inline_assistant_header_emitted: bool,
+    /// Pending inline transcript blocks waiting to be inserted above the viewport.
+    pub(crate) pending_inline_history: Vec<String>,
 }
 
 /// Immutable configuration used to launch the interactive terminal UI.
@@ -145,14 +157,14 @@ pub struct InteractiveTuiConfig {
     pub cwd: PathBuf,
     /// Environment overrides applied to the spawned stdio server process.
     pub server_env: Vec<(String, String)>,
-    /// Optional prompt submitted immediately after the UI opens.
-    pub startup_prompt: Option<String>,
     /// Built-in model catalog used for onboarding and model selection.
     pub model_catalog: BuiltinModelCatalog,
     /// Persisted model entries available for switching in the composer popup.
     pub saved_models: Vec<SavedModelEntry>,
     /// Whether to open the model picker on startup.
     pub show_model_onboarding: bool,
+    /// Terminal screen strategy used when launching the UI.
+    pub terminal_mode: TerminalMode,
 }
 
 #[path = "runtime.rs"]

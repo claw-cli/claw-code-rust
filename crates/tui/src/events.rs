@@ -69,7 +69,10 @@ pub struct SavedModelEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkerEvent {
     /// A new assistant turn has started.
-    TurnStarted,
+    TurnStarted {
+        /// The model slug resolved by the server for this turn.
+        model: String,
+    },
     /// Incremental assistant text.
     TextDelta(String),
     /// A tool call started.

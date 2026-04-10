@@ -1,13 +1,13 @@
 use crate::{Tool, ToolContext, ToolOutput};
 use async_trait::async_trait;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde_json::json;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Instant;
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::info;
 
 const DESCRIPTION: &str = include_str!("bash.txt");

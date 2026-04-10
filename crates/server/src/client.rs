@@ -3,8 +3,8 @@ use std::{
     path::PathBuf,
     process::Stdio,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -12,8 +12,9 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, Command},
-    sync::{mpsc, oneshot, Mutex},
+    process::{Child, ChildStderr, ChildStdin, Command},
+    sync::{Mutex, mpsc, oneshot},
+    time::{Duration, timeout},
 };
 
 use crate::{
@@ -62,23 +63,30 @@ pub struct StdioServerClient {
 impl StdioServerClient {
     /// Spawns a new stdio-connected `clawcr server` process.
     pub async fn spawn(config: StdioServerClientConfig) -> Result<Self> {
+        tracing::info!(
+            program = %config.program.display(),
+            workspace_root = ?config.workspace_root,
+            env_override_count = config.env.len(),
+            "spawning stdio server client"
+        );
         let mut command = Command::new(&config.program);
         command.arg("server");
         if let Some(workspace_root) = config.workspace_root {
-            command.arg("--workspace-root").arg(workspace_root);
+            command.arg("--working-root").arg(workspace_root);
         }
         for (key, value) in config.env {
             command.env(key, value);
         }
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
-        command.stderr(Stdio::null());
+        command.stderr(Stdio::piped());
 
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to spawn {}", config.program.display()))?;
         let stdin = child.stdin.take().context("capture server stdin")?;
         let stdout = child.stdout.take().context("capture server stdout")?;
+        let stderr = child.stderr.take().context("capture server stderr")?;
         let pending = Arc::new(Mutex::new(
             HashMap::<u64, oneshot::Sender<serde_json::Value>>::new(),
         ));
@@ -89,6 +97,7 @@ impl StdioServerClient {
             Arc::clone(&pending),
             notifications_tx,
         ));
+        tokio::spawn(run_stderr_reader(BufReader::new(stderr).lines()));
 
         Ok(Self {
             child,
@@ -101,8 +110,10 @@ impl StdioServerClient {
 
     /// Completes the initialize handshake for a stdio client transport.
     pub async fn initialize(&mut self) -> Result<InitializeResult> {
-        let result = self
-            .request(
+        tracing::info!("initializing stdio server client");
+        let result = timeout(
+            Duration::from_secs(10),
+            self.request(
                 "initialize",
                 InitializeParams {
                     client_name: "clawcr".into(),
@@ -112,9 +123,12 @@ impl StdioServerClient {
                     supports_binary_images: false,
                     opt_out_notification_methods: Vec::new(),
                 },
-            )
-            .await?;
+            ),
+        )
+        .await
+        .context("timed out waiting for initialize response from server")??;
         self.notify("initialized", serde_json::json!({})).await?;
+        tracing::info!("stdio server client initialized");
         Ok(result)
     }
 
@@ -203,6 +217,7 @@ impl StdioServerClient {
         R: DeserializeOwned,
     {
         let request_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
+        tracing::debug!(request_id, method, "sending client request");
         let (response_tx, response_rx) = oneshot::channel();
         self.pending.lock().await.insert(request_id, response_tx);
         self.write_json(&ClientRequest {
@@ -212,9 +227,13 @@ impl StdioServerClient {
         })
         .await?;
 
-        let response = response_rx
+        let response = timeout(Duration::from_secs(10), response_rx)
             .await
+            .with_context(|| {
+                format!("timed out waiting for server response to request {request_id}")
+            })?
             .with_context(|| format!("server dropped response for request {request_id}"))?;
+        tracing::debug!(request_id, method, "received client response");
         if response.get("error").is_some() {
             let error: ErrorResponse =
                 serde_json::from_value(response).context("decode error response from server")?;
@@ -274,6 +293,7 @@ async fn run_stdout_reader(
             continue;
         }
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            tracing::warn!(line = %line, "failed to parse JSON from server stdout");
             continue;
         };
         if let Some(request_id) = value.get("id").and_then(serde_json::Value::as_u64) {
@@ -292,6 +312,18 @@ async fn run_stdout_reader(
             params: notification.params,
         });
     }
+    tracing::warn!("server stdout reader stopped");
+}
+
+async fn run_stderr_reader(mut lines: tokio::io::Lines<BufReader<ChildStderr>>) {
+    while let Ok(Some(line)) = lines.next_line().await {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        tracing::warn!(server_stderr = %trimmed, "server child stderr");
+    }
+    tracing::warn!("server stderr reader stopped");
 }
 
 fn format_protocol_error_code(code: &ProtocolErrorCode) -> &'static str {

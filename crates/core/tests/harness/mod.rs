@@ -67,11 +67,11 @@ impl ScriptedProviderBuilder {
 
 #[async_trait]
 impl ModelProvider for ScriptedProvider {
-    async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
-        unreachable!("ScriptedProvider only supports stream()")
+    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+        unreachable!("ScriptedProvider only supports completion_stream()")
     }
 
-    async fn stream(
+    async fn completion_stream(
         &self,
         request: ModelRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {

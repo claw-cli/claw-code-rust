@@ -16,6 +16,11 @@ use clawcr_server::{
 
 use crate::events::{SessionListEntry, TranscriptItem, TranscriptItemKind, WorkerEvent};
 
+struct EnsureSessionOutcome {
+    session_id: SessionId,
+    resolved_model: Option<String>,
+}
+
 /// Immutable runtime configuration used to construct the background server client worker.
 pub(crate) struct QueryWorkerConfig {
     /// Model identifier used for new turns.
@@ -29,7 +34,7 @@ pub(crate) struct QueryWorkerConfig {
 }
 
 /// Commands accepted by the background query worker.
-enum WorkerCommand {
+enum OperationCommand {
     /// Submit a new user prompt to the session.
     SubmitPrompt(String),
     /// Update the model used for future turns.
@@ -68,7 +73,7 @@ enum WorkerCommand {
 /// Handle used by the UI thread to interact with the background query worker.
 pub(crate) struct QueryWorkerHandle {
     /// Sender used to submit commands to the worker.
-    command_tx: mpsc::UnboundedSender<WorkerCommand>,
+    command_tx: mpsc::UnboundedSender<OperationCommand>,
     /// Receiver used by the UI to consume worker events.
     pub(crate) event_rx: mpsc::UnboundedReceiver<WorkerEvent>,
     /// Background task running the worker loop.
@@ -91,21 +96,21 @@ impl QueryWorkerHandle {
     /// Submits one prompt to the worker.
     pub(crate) fn submit_prompt(&self, prompt: String) -> Result<()> {
         self.command_tx
-            .send(WorkerCommand::SubmitPrompt(prompt))
+            .send(OperationCommand::SubmitPrompt(prompt))
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
     /// Updates the active session model for future turns.
     pub(crate) fn set_model(&self, model: String) -> Result<()> {
         self.command_tx
-            .send(WorkerCommand::SetModel(model))
+            .send(OperationCommand::SetModel(model))
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
     /// Updates the thinking mode used for future turns.
     pub(crate) fn set_thinking(&self, thinking: Option<String>) -> Result<()> {
         self.command_tx
-            .send(WorkerCommand::SetThinking(thinking))
+            .send(OperationCommand::SetThinking(thinking))
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
@@ -117,7 +122,7 @@ impl QueryWorkerHandle {
         api_key: Option<String>,
     ) -> Result<()> {
         self.command_tx
-            .send(WorkerCommand::ReconfigureProvider {
+            .send(OperationCommand::ReconfigureProvider {
                 model,
                 base_url,
                 api_key,
@@ -133,7 +138,7 @@ impl QueryWorkerHandle {
         api_key: Option<String>,
     ) -> Result<()> {
         self.command_tx
-            .send(WorkerCommand::ValidateProvider {
+            .send(OperationCommand::ValidateProvider {
                 model,
                 base_url,
                 api_key,
@@ -144,41 +149,41 @@ impl QueryWorkerHandle {
     /// Requests the current persisted session list from the background worker.
     pub(crate) fn list_sessions(&self) -> Result<()> {
         self.command_tx
-            .send(WorkerCommand::ListSessions)
+            .send(OperationCommand::ListSessions)
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
     /// Clears the active session so the next submitted prompt starts a fresh one lazily.
     pub(crate) fn start_new_session(&self) -> Result<()> {
         self.command_tx
-            .send(WorkerCommand::StartNewSession)
+            .send(OperationCommand::StartNewSession)
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
     /// Switches the active session to a persisted session identifier.
     pub(crate) fn switch_session(&self, session_id: SessionId) -> Result<()> {
         self.command_tx
-            .send(WorkerCommand::SwitchSession(session_id))
+            .send(OperationCommand::SwitchSession(session_id))
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
     /// Renames the current active session.
     pub(crate) fn rename_session(&self, title: String) -> Result<()> {
         self.command_tx
-            .send(WorkerCommand::RenameSession(title))
+            .send(OperationCommand::RenameSession(title))
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
     /// Interrupts the active turn when one exists.
     pub(crate) fn interrupt_turn(&self) -> Result<()> {
         self.command_tx
-            .send(WorkerCommand::InterruptTurn)
+            .send(OperationCommand::InterruptTurn)
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
     /// Stops the worker task and waits for it to finish.
     pub(crate) async fn shutdown(self) -> Result<()> {
-        let _ = self.command_tx.send(WorkerCommand::Shutdown);
+        let _ = self.command_tx.send(OperationCommand::Shutdown);
         self.join_handle.abort();
         let _ = self.join_handle.await.map_err(map_join_error);
         Ok(())
@@ -201,7 +206,7 @@ impl QueryWorkerHandle {
 
 async fn run_worker(
     config: QueryWorkerConfig,
-    mut command_rx: mpsc::UnboundedReceiver<WorkerCommand>,
+    mut command_rx: mpsc::UnboundedReceiver<OperationCommand>,
     event_tx: mpsc::UnboundedSender<WorkerEvent>,
 ) {
     if let Err(error) = run_worker_inner(config, &mut command_rx, &event_tx).await {
@@ -216,7 +221,7 @@ async fn run_worker(
 
 async fn run_worker_inner(
     config: QueryWorkerConfig,
-    command_rx: &mut mpsc::UnboundedReceiver<WorkerCommand>,
+    command_rx: &mut mpsc::UnboundedReceiver<OperationCommand>,
     event_tx: &mpsc::UnboundedSender<WorkerEvent>,
 ) -> Result<()> {
     // The worker owns the server client and translates UI commands into server
@@ -237,13 +242,18 @@ async fn run_worker_inner(
         tokio::select! {
             maybe_command = command_rx.recv() => {
                 match maybe_command {
-                    Some(WorkerCommand::SubmitPrompt(prompt)) => {
-                        let active_session_id = ensure_session_started(
+                    Some(OperationCommand::SubmitPrompt(prompt)) => {
+                        let session_start = ensure_session_started(
                             &mut client,
                             &config.cwd,
                             &model,
                             &mut session_id,
-                        ).await?;
+                        )
+                        .await?;
+                        if let Some(resolved_model) = session_start.resolved_model.clone() {
+                            model = resolved_model;
+                        }
+                        let active_session_id = session_start.session_id;
                         let start_result = client.turn_start(TurnStartParams {
                             session_id: active_session_id,
                             input: vec![InputItem::Text { text: prompt }],
@@ -267,13 +277,13 @@ async fn run_worker_inner(
                             }
                         }
                     }
-                    Some(WorkerCommand::SetModel(next_model)) => {
+                    Some(OperationCommand::SetModel(next_model)) => {
                         model = next_model;
                     }
-                    Some(WorkerCommand::SetThinking(next_thinking)) => {
+                    Some(OperationCommand::SetThinking(next_thinking)) => {
                         thinking_selection = next_thinking;
                     }
-                    Some(WorkerCommand::ValidateProvider {
+                    Some(OperationCommand::ValidateProvider {
                         model: next_model,
                         base_url,
                         api_key,
@@ -297,7 +307,7 @@ async fn run_worker_inner(
                             }
                         }
                     }
-                Some(WorkerCommand::ReconfigureProvider {
+                Some(OperationCommand::ReconfigureProvider {
                     model: next_model,
                     base_url,
                     api_key,
@@ -314,7 +324,7 @@ async fn run_worker_inner(
                         session_id = None;
                         active_turn_id = None;
                     }
-                    Some(WorkerCommand::ListSessions) => {
+                    Some(OperationCommand::ListSessions) => {
                         match tokio::time::timeout(
                             Duration::from_secs(5),
                             client.session_list(SessionListParams::default()),
@@ -358,12 +368,12 @@ async fn run_worker_inner(
                             }
                         }
                     }
-                    Some(WorkerCommand::StartNewSession) => {
+                    Some(OperationCommand::StartNewSession) => {
                         active_turn_id = None;
                         session_id = None;
                         let _ = event_tx.send(WorkerEvent::NewSessionPrepared);
                     }
-                    Some(WorkerCommand::SwitchSession(next_session_id)) => {
+                    Some(OperationCommand::SwitchSession(next_session_id)) => {
                         match client
                             .session_resume(SessionResumeParams {
                                 session_id: next_session_id,
@@ -395,7 +405,7 @@ async fn run_worker_inner(
                             }
                         }
                     }
-                    Some(WorkerCommand::RenameSession(title)) => {
+                    Some(OperationCommand::RenameSession(title)) => {
                         let Some(active_session_id) = session_id else {
                             let _ = event_tx.send(WorkerEvent::TurnFailed {
                                 message: "no active session exists yet; send a prompt or switch to a saved session first".to_string(),
@@ -431,7 +441,7 @@ async fn run_worker_inner(
                             }
                         }
                     }
-                    Some(WorkerCommand::InterruptTurn) => {
+                    Some(OperationCommand::InterruptTurn) => {
                         if let (Some(turn_id), Some(active_session_id)) = (active_turn_id, session_id) {
                             if let Err(error) = client
                                 .turn_interrupt(TurnInterruptParams {
@@ -450,7 +460,7 @@ async fn run_worker_inner(
                             }
                         }
                     }
-                    Some(WorkerCommand::Shutdown) | None => {
+                    Some(OperationCommand::Shutdown) | None => {
                         break;
                     }
                 }
@@ -462,9 +472,12 @@ async fn run_worker_inner(
                             "turn/started" => {
                                 if let ServerEvent::TurnStarted(payload) = event {
                                     active_turn_id = Some(payload.turn.turn_id);
+                                    model = payload.turn.model_slug.clone();
+                                    let _ = event_tx.send(WorkerEvent::TurnStarted {
+                                        model: payload.turn.model_slug,
+                                    });
                                 }
                                 latest_completed_agent_message = None;
-                                let _ = event_tx.send(WorkerEvent::TurnStarted);
                             }
                             "item/agentMessage/delta" => {
                                 if let ServerEvent::ItemDelta { payload, .. } = event {
@@ -557,9 +570,12 @@ async fn ensure_session_started(
     cwd: &PathBuf,
     model: &str,
     session_id: &mut Option<SessionId>,
-) -> Result<SessionId> {
+) -> Result<EnsureSessionOutcome> {
     if let Some(session_id) = session_id {
-        return Ok(*session_id);
+        return Ok(EnsureSessionOutcome {
+            session_id: *session_id,
+            resolved_model: Some(model.to_string()),
+        });
     }
 
     let session = client
@@ -571,7 +587,10 @@ async fn ensure_session_started(
         })
         .await?;
     *session_id = Some(session.session_id);
-    Ok(session.session_id)
+    Ok(EnsureSessionOutcome {
+        session_id: session.session_id,
+        resolved_model: session.resolved_model,
+    })
 }
 
 async fn spawn_client(cwd: &PathBuf, env: Vec<(String, String)>) -> Result<StdioServerClient> {

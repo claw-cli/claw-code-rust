@@ -32,6 +32,10 @@ pub(super) fn overlay_border() -> Style {
     Style::new().fg(Color::Gray)
 }
 
+pub(super) fn menu_surface() -> Style {
+    Style::new().bg(Color::Rgb(24, 24, 24))
+}
+
 pub(super) fn transcript_title(kind: TranscriptItemKind) -> Style {
     match kind {
         TranscriptItemKind::ToolCall | TranscriptItemKind::ToolResult => {

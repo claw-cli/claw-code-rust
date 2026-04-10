@@ -1,21 +1,23 @@
-//! Interactive terminal UI for ClawCR.
+//! Interactive terminal UI.
 //!
-//! This module is the public entry point for launching the full-screen TUI.
+//! public entry point for launching the CLI TUI.
 
 mod app;
 mod events;
 mod input;
-mod onboarding_config;
+mod onboarding;
 mod paste_burst;
 mod render;
 mod slash;
 mod terminal;
+mod transcript;
 mod worker;
 
-pub use app::run_interactive_tui;
 pub use app::AppExit;
 pub use app::InteractiveTuiConfig;
+pub use app::run_interactive_tui;
 pub use events::SavedModelEntry;
+pub use terminal::TerminalMode;
 
 #[cfg(test)]
 mod tests;

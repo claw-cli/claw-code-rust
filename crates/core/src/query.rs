@@ -500,8 +500,8 @@ pub async fn query(
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use anyhow::Result;
     use async_trait::async_trait;
@@ -523,11 +523,11 @@ mod tests {
 
     #[async_trait]
     impl clawcr_provider::ModelProvider for SingleToolUseProvider {
-        async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
+        async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
             unreachable!("tests stream responses only")
         }
 
-        async fn stream(
+        async fn completion_stream(
             &self,
             _request: ModelRequest,
         ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {

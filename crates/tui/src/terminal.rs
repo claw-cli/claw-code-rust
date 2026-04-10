@@ -5,76 +5,64 @@ use crossterm::{
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
+use ratatui::{
+    Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, layout::Rect, style::Style,
+};
 
 /// Shared terminal type used by the interactive UI.
 pub(crate) type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
+
+/// Strategy for deciding whether the UI should enter the alternate screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalMode {
+    /// Always use the alternate screen.
+    Always,
+    /// Never use the alternate screen.
+    Never,
+    /// Use the alternate screen only when explicitly enabled by environment.
+    Auto,
+}
 
 /// Owns terminal mode changes for the lifetime of the interactive UI.
 pub(crate) struct ManagedTerminal {
     /// The ratatui terminal backend used for rendering.
     terminal: AppTerminal,
+    /// Whether we switched the terminal into the alternate screen on startup.
+    use_alternate_screen: bool,
+    /// Current reserved inline viewport height when rendering in the main screen buffer.
+    inline_viewport_height: u16,
 }
 
-// TODO(terminal-mode):
-// Current TUI always enters alternate screen + raw mode, which:
-// - clears scrollback
-// - disables native terminal scrolling
-// - makes transcript fully app-controlled
-//
-// This does not match a "shell-first" UX (e.g. Codex / Gemini CLI).
-//
-// Refactor terminal handling to support multiple modes:
-//
-// 1) Alternate screen strategy (configurable):
-//    - always: always enter alternate screen (current behavior)
-//    - never: render in main buffer (preserve scrollback)
-//    - auto: detect environment (tmux/zellij/VSCode/xterm.js) and decide
-//
-// 2) Decouple terminal setup from TuiApp:
-//    - pass `use_alternate_screen` into ManagedTerminal
-//    - only call EnterAlternateScreen / LeaveAlternateScreen when enabled
-//
-// 3) Improve non-alt-screen behavior:
-//    - avoid full-screen redraw assumptions
-//    - ensure output remains readable in scrollback
-//    - minimize flicker / cursor jumps
-//    - rely more on terminal-native scrollback instead of app-managed transcript scrolling
-//
-// 4) Keyboard semantics (keep consistent across modes):
-//    - Up / Down:
-//        * navigate composer history OR slash suggestions
-//        * MUST NOT change meaning based on terminal mode
-//    - PageUp / PageDown (or equivalent):
-//        * scroll transcript when in alt-screen mode
-//    - In non-alt-screen mode:
-//        * transcript scrolling should be delegated to terminal scrollback
-//        * avoid introducing separate in-app scroll behavior
-//
-//    Rationale:
-//    - avoid mode-dependent surprises for primary keys
-//    - keep input-related navigation (history/suggestions) consistent
-//    - separate "input navigation" from "output browsing"
-//
-// 5) Future direction:
-//    - support hybrid mode: streaming output to stdout + interactive composer
-//    - reduce reliance on app-internal scrolling for transcript
-//
-// Goal:
-// make TUI compatible with both full-screen workflows AND shell-native workflows,
-// while keeping interaction semantics consistent and predictable.
-
 impl ManagedTerminal {
-    /// Enters raw mode and the alternate screen before constructing the backend.
-    pub(crate) fn new() -> io::Result<Self> {
+    /// Enters raw mode and, when appropriate, the alternate screen before constructing the backend.
+    pub(crate) fn new(mode: TerminalMode) -> io::Result<Self> {
         // This wrapper centralizes terminal setup so cleanup happens reliably even
         // when the TUI exits early or panics.
         let mut stdout = io::stdout();
+        let use_alternate_screen = should_use_alternate_screen(mode);
         terminal::enable_raw_mode()?;
-        execute!(stdout, EnterAlternateScreen, Hide)?;
+        if use_alternate_screen {
+            execute!(stdout, EnterAlternateScreen, Hide)?;
+        } else {
+            execute!(stdout, Hide)?;
+        }
         let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal })
+        let inline_viewport_height = 1;
+        let terminal = if use_alternate_screen {
+            Terminal::new(backend)?
+        } else {
+            Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Inline(inline_viewport_height),
+                },
+            )?
+        };
+        Ok(Self {
+            terminal,
+            use_alternate_screen,
+            inline_viewport_height,
+        })
     }
 
     /// Returns the current terminal area.
@@ -88,12 +76,82 @@ impl ManagedTerminal {
         &mut self.terminal
     }
 
+    pub(crate) fn set_inline_viewport_height(&mut self, height: u16) -> io::Result<()> {
+        if self.use_alternate_screen {
+            return Ok(());
+        }
+
+        let next_height = height.max(1);
+        if next_height == self.inline_viewport_height {
+            return Ok(());
+        }
+
+        let mut stdout = io::stdout();
+        execute!(stdout, Hide)?;
+        self.terminal = Terminal::with_options(
+            CrosstermBackend::new(stdout),
+            TerminalOptions {
+                viewport: Viewport::Inline(next_height),
+            },
+        )?;
+        self.inline_viewport_height = next_height;
+        Ok(())
+    }
+
+    pub(crate) fn uses_alternate_screen(&self) -> bool {
+        self.use_alternate_screen
+    }
+
+    pub(crate) fn insert_history_block(&mut self, text: &str) -> io::Result<()> {
+        if self.use_alternate_screen || text.is_empty() {
+            return Ok(());
+        }
+
+        let lines = text
+            .split('\n')
+            .map(std::borrow::ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if lines.is_empty() {
+            return Ok(());
+        }
+
+        let height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+        self.terminal.insert_before(height, |buf| {
+            for (index, line) in lines.iter().enumerate().take(buf.area.height as usize) {
+                buf.set_stringn(
+                    0,
+                    index as u16,
+                    line,
+                    usize::from(buf.area.width),
+                    Style::default(),
+                );
+            }
+        })
+    }
+
+    pub(crate) fn flush_pending_inline_history(
+        &mut self,
+        pending_inline_history: &mut Vec<String>,
+    ) -> io::Result<()> {
+        if pending_inline_history.is_empty() {
+            return Ok(());
+        }
+
+        let text = pending_inline_history.concat();
+        pending_inline_history.clear();
+        self.insert_history_block(&text)
+    }
+
     /// Restores the terminal to normal mode.
     pub(crate) fn restore(&mut self) -> io::Result<()> {
         // Drop back to the original terminal state before returning control to the
         // shell and show the cursor again for non-TUI workflows.
         terminal::disable_raw_mode()?;
-        execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen)?;
+        if self.use_alternate_screen {
+            execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen)?;
+        } else {
+            execute!(self.terminal.backend_mut(), Show)?;
+        }
         self.terminal.show_cursor()?;
         Ok(())
     }
@@ -102,5 +160,34 @@ impl ManagedTerminal {
 impl Drop for ManagedTerminal {
     fn drop(&mut self) {
         let _ = self.restore();
+    }
+}
+
+fn should_use_alternate_screen(mode: TerminalMode) -> bool {
+    match mode {
+        TerminalMode::Always => true,
+        TerminalMode::Never => false,
+        TerminalMode::Auto => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TerminalMode;
+    use super::should_use_alternate_screen;
+
+    #[test]
+    fn alternate_screen_is_disabled_when_explicitly_requested() {
+        assert!(!should_use_alternate_screen(TerminalMode::Never));
+    }
+
+    #[test]
+    fn auto_mode_defaults_to_inline() {
+        assert!(!should_use_alternate_screen(TerminalMode::Auto));
+    }
+
+    #[test]
+    fn always_mode_forces_alternate_screen() {
+        assert!(should_use_alternate_screen(TerminalMode::Always));
     }
 }

@@ -20,10 +20,10 @@ use serde_json::json;
 use clawcr_provider::StopReason;
 use clawcr_tools::{ToolOrchestrator, ToolRegistry};
 
-use clawcr_core::{query, AgentError, ContentBlock, Message};
+use clawcr_core::{AgentError, ContentBlock, Message, query};
 
 use harness::builders::*;
-use harness::{event_collector, ScriptedProvider, SpyTool};
+use harness::{ScriptedProvider, SpyTool, event_collector};
 
 fn setup_registry() -> (Arc<ToolRegistry>, ToolOrchestrator) {
     let registry = Arc::new(ToolRegistry::new());

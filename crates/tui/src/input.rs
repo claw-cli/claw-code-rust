@@ -1,4 +1,4 @@
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Mutable composer buffer used by the interactive terminal UI.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -127,6 +127,61 @@ impl InputBuffer {
         self.layout_with_prompt(full_width, prompt).lines
     }
 
+    /// Returns a horizontally scrolled single-line prompt view for inline mode.
+    pub(crate) fn inline_line(&self, full_width: u16, prefix: &str) -> InlineInputLine {
+        let width_limit = usize::from(full_width.max(1));
+        let prefix_width = UnicodeWidthStr::width(prefix).min(width_limit);
+        let available_width = width_limit.saturating_sub(prefix_width);
+        let mut rendered = prefix.to_string();
+
+        if available_width == 0 {
+            return InlineInputLine {
+                text: rendered,
+                cursor_x: prefix_width.saturating_sub(1) as u16,
+            };
+        }
+
+        let flattened = self
+            .text
+            .chars()
+            .map(|ch| if ch == '\n' { ' ' } else { ch })
+            .collect::<Vec<_>>();
+        let widths = flattened
+            .iter()
+            .map(|ch| UnicodeWidthChar::width(*ch).unwrap_or(1).max(1))
+            .collect::<Vec<_>>();
+        let cursor_chars = self.cursor_chars.min(flattened.len());
+        let mut start = cursor_chars;
+        let mut width_before_cursor = 0usize;
+
+        while start > 0 {
+            let next_width = widths[start - 1];
+            if width_before_cursor + next_width > available_width {
+                break;
+            }
+            width_before_cursor += next_width;
+            start -= 1;
+        }
+
+        let mut consumed_width = 0usize;
+        for (index, ch) in flattened.iter().enumerate().skip(start) {
+            let ch_width = widths[index];
+            if consumed_width + ch_width > available_width {
+                break;
+            }
+            rendered.push(*ch);
+            consumed_width += ch_width;
+        }
+
+        let cursor_width = widths[start..cursor_chars].iter().sum::<usize>();
+        let cursor_x = (prefix_width + cursor_width).min(width_limit.saturating_sub(1));
+
+        InlineInputLine {
+            text: rendered,
+            cursor_x: cursor_x as u16,
+        }
+    }
+
     fn char_len(&self) -> usize {
         self.text.chars().count()
     }
@@ -215,6 +270,15 @@ struct ComposerLayout {
     cursor: (u16, u16),
 }
 
+/// Single-line inline input representation with horizontal scrolling applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InlineInputLine {
+    /// Rendered prompt prefix and visible input text.
+    pub(crate) text: String,
+    /// Cursor offset within the rendered line.
+    pub(crate) cursor_x: u16,
+}
+
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
@@ -278,5 +342,27 @@ mod tests {
         buffer.insert_str(" \n ");
 
         assert!(buffer.is_blank());
+    }
+
+    #[test]
+    fn inline_line_keeps_cursor_visible_when_text_overflows() {
+        let mut buffer = InputBuffer::new();
+        buffer.insert_str("abcdefghijklmnopqrstuvwxyz");
+
+        let line = buffer.inline_line(12, "› ");
+
+        assert_eq!(line.text, "› qrstuvwxyz");
+        assert_eq!(line.cursor_x, 11);
+    }
+
+    #[test]
+    fn inline_line_flattens_newlines() {
+        let mut buffer = InputBuffer::new();
+        buffer.insert_str("hi\nthere");
+
+        let line = buffer.inline_line(20, "label> ");
+
+        assert_eq!(line.text, "label> hi there");
+        assert_eq!(line.cursor_x, 15);
     }
 }

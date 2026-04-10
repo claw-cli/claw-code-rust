@@ -1,11 +1,11 @@
 use anyhow::Result;
 use clawcr_core::{BuiltinModelCatalog, ProviderKind};
-use clawcr_tui::{run_interactive_tui, InteractiveTuiConfig, SavedModelEntry};
+use clawcr_tui::{InteractiveTuiConfig, SavedModelEntry, TerminalMode, run_interactive_tui};
 
 use crate::config;
 
 /// Runs the interactive coding-agent entrypoint.
-pub async fn run_agent(force_onboarding: bool) -> Result<()> {
+pub async fn run_agent(force_onboarding: bool, no_alt_screen: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let model_catalog = BuiltinModelCatalog::load()?;
     let stored_config = config::load_config().unwrap_or_default();
@@ -44,10 +44,14 @@ pub async fn run_agent(force_onboarding: bool) -> Result<()> {
         provider,
         cwd,
         server_env,
-        startup_prompt: None,
         model_catalog,
         saved_models,
         show_model_onboarding: onboarding_mode,
+        terminal_mode: if no_alt_screen {
+            TerminalMode::Never
+        } else {
+            TerminalMode::Auto
+        },
     })
     .await
     .map(|_| ())

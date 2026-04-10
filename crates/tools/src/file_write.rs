@@ -100,9 +100,5 @@ impl Tool for FileWriteTool {
 
 fn resolve_path(cwd: &std::path::Path, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
-    if p.is_absolute() {
-        p
-    } else {
-        cwd.join(p)
-    }
+    if p.is_absolute() { p } else { cwd.join(p) }
 }

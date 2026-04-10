@@ -19,11 +19,7 @@ use clawcr_tools::ToolRegistry;
 use futures::stream;
 
 fn write_test_config(home_dir: &TempDir, listen: &[&str]) -> Result<()> {
-    #[cfg(windows)]
     let config_dir = home_dir.path().join(".clawcr");
-
-    #[cfg(unix)]
-    let config_dir = home_dir.path().join(".config").join("clawcr");
 
     std::fs::create_dir_all(&config_dir)?;
     let listen_entries = listen
@@ -57,11 +53,11 @@ struct PendingProvider;
 
 #[async_trait]
 impl ModelProvider for PendingProvider {
-    async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
-        anyhow::bail!("test provider does not support complete")
+    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+        anyhow::bail!("test provider does not support completion")
     }
 
-    async fn stream(
+    async fn completion_stream(
         &self,
         _request: ModelRequest,
     ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
@@ -81,8 +77,10 @@ async fn stdio_server_process_supports_handshake_and_session_start() -> Result<(
     let test_cwd = home_dir.path().to_string_lossy().into_owned();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_clawcr-server"))
+        .env("CLAWCR_HOME", home_dir.path().join(".clawcr"))
         .env("USERPROFILE", home_dir.path())
         .env("HOME", home_dir.path())
+        .env("CLAWCR_PROVIDER", "openai")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -381,7 +379,7 @@ async fn read_websocket_json(
         loop {
             match socket.next().await.context("websocket closed")?? {
                 Message::Text(text) => {
-                    return serde_json::from_str(text.as_str()).map_err(Into::into)
+                    return serde_json::from_str(text.as_str()).map_err(Into::into);
                 }
                 _ => continue,
             }

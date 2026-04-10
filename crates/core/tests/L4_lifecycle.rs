@@ -21,10 +21,10 @@ use clawcr_provider::{StopReason, Usage};
 use clawcr_safety::legacy_permissions::PermissionMode;
 use clawcr_tools::{ToolOrchestrator, ToolOutput, ToolRegistry};
 
-use clawcr_core::{query, AgentError, ContentBlock, Message, QueryEvent, Role, SessionConfig};
+use clawcr_core::{AgentError, ContentBlock, Message, QueryEvent, Role, SessionConfig, query};
 
 use harness::builders::*;
-use harness::{event_collector, ScriptedProvider, SpyTool};
+use harness::{ScriptedProvider, SpyTool, event_collector};
 
 fn setup_registry() -> (Arc<ToolRegistry>, ToolOrchestrator) {
     let registry = Arc::new(ToolRegistry::new());

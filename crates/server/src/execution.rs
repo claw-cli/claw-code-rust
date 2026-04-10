@@ -3,8 +3,8 @@ use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 use tokio::{sync::Mutex, task::JoinHandle};
 
 use clawcr_core::{
-    default_base_instructions, ModelCatalog, SessionConfig, SessionId, SessionRecord, SessionState,
-    ThinkingCapability,
+    ModelCatalog, SessionConfig, SessionId, SessionRecord, SessionState, ThinkingCapability,
+    default_base_instructions,
 };
 use clawcr_provider::ModelProvider;
 use clawcr_tools::ToolRegistry;

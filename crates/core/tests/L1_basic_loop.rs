@@ -9,10 +9,10 @@ use clawcr_provider::{StopReason, Usage};
 use clawcr_safety::legacy_permissions::PermissionMode;
 use clawcr_tools::{ToolOrchestrator, ToolRegistry};
 
-use clawcr_core::{query, ContentBlock, QueryEvent, Role, SessionConfig};
+use clawcr_core::{ContentBlock, QueryEvent, Role, SessionConfig, query};
 
 use harness::builders::*;
-use harness::{event_collector, ScriptedProvider, SpyTool};
+use harness::{ScriptedProvider, SpyTool, event_collector};
 
 fn setup_registry() -> (Arc<ToolRegistry>, ToolOrchestrator) {
     let registry = Arc::new(ToolRegistry::new());
@@ -307,10 +307,12 @@ async fn multiple_concurrent_tool_calls() {
     let tool_result_msg = &session.messages[2]; // user, assistant(2 tools), user(2 results)
     assert_eq!(tool_result_msg.role, Role::User);
     assert_eq!(tool_result_msg.content.len(), 2);
-    assert!(tool_result_msg
-        .content
-        .iter()
-        .all(|b| matches!(b, ContentBlock::ToolResult { .. })));
+    assert!(
+        tool_result_msg
+            .content
+            .iter()
+            .all(|b| matches!(b, ContentBlock::ToolResult { .. }))
+    );
 }
 
 // ---------------------------------------------------------------------------

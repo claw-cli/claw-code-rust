@@ -107,11 +107,7 @@ fn read_directory(path: &Path, limit: usize, offset: usize) -> anyhow::Result<To
         .map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
             let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-            if is_dir {
-                format!("{name}/")
-            } else {
-                name
-            }
+            if is_dir { format!("{name}/") } else { name }
         })
         .collect::<Vec<_>>();
     items.sort_unstable_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));

@@ -16,8 +16,8 @@ mod harness;
 use std::sync::{Arc, Mutex};
 
 use clawcr_core::{
-    query, ContentBlock, EventCallback, Message, QueryEvent, ReasoningLevel, Role, SessionConfig,
-    SessionState, TokenBudget,
+    ContentBlock, EventCallback, Message, QueryEvent, ReasoningLevel, Role, SessionConfig,
+    SessionState, TokenBudget, query,
 };
 use clawcr_provider::openai::OpenAIProvider;
 use clawcr_safety::legacy_permissions::PermissionMode;
@@ -639,7 +639,9 @@ async fn e2e_tool_use_round_trip() {
                 .collect();
 
             if tool_starts.is_empty() {
-                eprintln!("[e2e] model chose not to use tools — this is model-dependent, not a runtime bug");
+                eprintln!(
+                    "[e2e] model chose not to use tools — this is model-dependent, not a runtime bug"
+                );
             } else {
                 eprintln!(
                     "[e2e] model made {} tool call(s) — tool flow verified!",

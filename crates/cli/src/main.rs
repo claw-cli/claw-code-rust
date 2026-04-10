@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use clawcr_core::{
     AppConfig, AppConfigLoader, FileSystemAppConfigLoader, LoggingBootstrap, LoggingRuntime,
 };
-use clawcr_server::{run_server_process, ServerProcessArgs};
+use clawcr_server::{ServerProcessArgs, run_server_process};
 use clawcr_utils::find_clawcr_home;
 
 mod agent;
@@ -18,6 +18,10 @@ use agent::run_agent;
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+
+    /// Keep the UI in the main terminal buffer instead of switching to the alternate screen.
+    #[arg(long = "no-alt-screen", default_value_t = false)]
+    no_alt_screen: bool,
 }
 
 #[tokio::main]
@@ -27,7 +31,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Server(args)) => run_server_process(args).await,
-        None => run_agent(false).await,
+        None => run_agent(false, cli.no_alt_screen).await,
     }
 }
 
@@ -42,7 +46,7 @@ fn install_logging(cli: &Cli) -> Result<LoggingRuntime> {
     let loader = FileSystemAppConfigLoader::new(home_dir.clone());
     let current_dir = std::env::current_dir()?;
     let workspace_root = match &cli.command {
-        Some(Command::Server(args)) => args.workspace_root.as_deref(),
+        Some(Command::Server(args)) => args.working_root.as_deref(),
         _ => Some(current_dir.as_path()),
     };
     let app_config = loader.load(workspace_root).unwrap_or_else(|err| {

@@ -203,7 +203,7 @@ enum RawThinkingCapability {
 mod tests {
     use pretty_assertions::assert_eq;
 
-    use super::{default_base_instructions, load_builtin_models, BuiltinModelCatalog};
+    use super::{BuiltinModelCatalog, default_base_instructions, load_builtin_models};
     use crate::ModelCatalog;
 
     #[test]

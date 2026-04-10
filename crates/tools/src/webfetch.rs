@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use base64::Engine;
 use serde_json::json;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 use crate::{Tool, ToolContext, ToolOutput};
 
@@ -52,9 +52,13 @@ impl Tool for WebFetchTool {
             .min(MAX_TIMEOUT_MS);
 
         let accept = match format {
-            "markdown" => "text/markdown;q=1.0, text/x-markdown;q=0.9, text/plain;q=0.8, text/html;q=0.7, */*;q=0.1",
+            "markdown" => {
+                "text/markdown;q=1.0, text/x-markdown;q=0.9, text/plain;q=0.8, text/html;q=0.7, */*;q=0.1"
+            }
             "text" => "text/plain;q=1.0, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.1",
-            "html" => "text/html;q=1.0, application/xhtml+xml;q=0.9, text/plain;q=0.8, text/markdown;q=0.7, */*;q=0.1",
+            "html" => {
+                "text/html;q=1.0, application/xhtml+xml;q=0.9, text/plain;q=0.8, text/markdown;q=0.7, */*;q=0.1"
+            }
             _ => "*/*",
         };
 

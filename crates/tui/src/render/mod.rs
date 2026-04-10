@@ -4,11 +4,11 @@ mod theme;
 mod transcript;
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Flex, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap},
-    Frame,
 };
 use std::{
     collections::HashMap,
@@ -20,8 +20,11 @@ use std::{
 use crate::{
     app::{AuxPanel, AuxPanelContent, TuiApp},
     events::{ModelListEntry, ThinkingListEntry},
+    slash::SlashCommandSpec,
 };
 use clawcr_core::{BuiltinModelCatalog, ModelCatalog};
+use textwrap::{Options, wrap};
+use unicode_width::UnicodeWidthStr;
 
 const MIN_OVERLAY_WIDTH: u16 = 44;
 const MAX_OVERLAY_WIDTH: u16 = 76;
@@ -35,7 +38,12 @@ static GIT_BRANCH_CACHE: LazyLock<Mutex<HashMap<String, Option<String>>>> =
 static BUILTIN_MODEL_CATALOG: LazyLock<Option<BuiltinModelCatalog>> =
     LazyLock::new(|| BuiltinModelCatalog::load().ok());
 
-pub(crate) fn draw(frame: &mut Frame, app: &TuiApp) {
+pub(crate) fn draw(frame: &mut Frame, app: &TuiApp, inline_mode: bool) {
+    if inline_mode {
+        draw_inline(frame, app);
+        return;
+    }
+
     frame.render_widget(Clear, frame.area());
     let content_area = centered_content_area(frame.area());
     let composer_height = composer_height(app, content_area);
@@ -48,14 +56,16 @@ pub(crate) fn draw(frame: &mut Frame, app: &TuiApp) {
     ])
     .areas(content_area);
 
-    frame.render_widget(
-        transcript::render(
-            app,
-            transcript_area.width.max(1),
-            transcript_area.height.max(1),
-        ),
-        transcript_area,
-    );
+    if !inline_mode {
+        frame.render_widget(
+            transcript::render(
+                app,
+                transcript_area.width.max(1),
+                transcript_area.height.max(1),
+            ),
+            transcript_area,
+        );
+    }
     frame.render_widget(Paragraph::new(""), spacer_area);
 
     let composer_block = Block::default()
@@ -87,6 +97,25 @@ pub(crate) fn draw(frame: &mut Frame, app: &TuiApp) {
     render_overlay(frame, app, content_area, transcript_area, composer_area);
 
     frame.set_cursor_position(composer::cursor(app, composer_area));
+}
+
+fn draw_inline(frame: &mut Frame, app: &TuiApp) {
+    let area = frame.area();
+    let popup_height =
+        inline_bottom_region_height(app, area.width).min(area.height.saturating_sub(1));
+    let (prompt_area, popup_area) = inline_layout_areas(area, popup_height);
+
+    frame.render_widget(Clear, prompt_area);
+    frame.render_widget(
+        composer::render_inline_status_bar(app, prompt_area.width.max(1)),
+        prompt_area,
+    );
+    render_inline_bottom_region(frame, app, popup_area);
+    frame.set_cursor_position(composer::cursor_inline(app, prompt_area));
+}
+
+pub(crate) fn inline_viewport_height(app: &TuiApp, width: u16) -> u16 {
+    1u16.saturating_add(inline_bottom_region_height(app, width))
 }
 
 pub(crate) fn centered_content_area(area: Rect) -> Rect {
@@ -286,6 +315,31 @@ fn render_overlay(
     frame.render_stateful_widget(list, overlay_area, &mut state);
 }
 
+fn render_inline_bottom_region(frame: &mut Frame, app: &TuiApp, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+
+    frame.render_widget(Clear, area);
+
+    if let Some(panel) = inline_aux_panel(app) {
+        render_inline_aux_panel(frame, area, app, panel);
+        return;
+    }
+
+    let suggestions = app.slash_suggestions();
+    if suggestions.is_empty() {
+        return;
+    }
+
+    render_inline_command_popup(
+        frame,
+        area,
+        suggestions.as_slice(),
+        app.slash_selection.min(suggestions.len().saturating_sub(1)),
+    );
+}
+
 fn render_aux_panel_overlay(
     frame: &mut Frame,
     app: &TuiApp,
@@ -406,8 +460,166 @@ fn render_aux_panel_overlay(
     }
 }
 
+fn render_inline_command_popup(
+    frame: &mut Frame,
+    area: Rect,
+    suggestions: &[SlashCommandSpec],
+    selected_idx: usize,
+) {
+    if area.is_empty() {
+        return;
+    }
+
+    frame.render_widget(Block::default().style(theme::menu_surface()), area);
+
+    let inner = Rect {
+        x: area.x.saturating_add(2),
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: area.height,
+    };
+    let rows = inline_command_popup_rows(suggestions, selected_idx, inner.width.max(1));
+    let start_y = inner
+        .y
+        .saturating_add(inner.height.saturating_sub(rows.len() as u16));
+
+    for (index, line) in rows.into_iter().enumerate() {
+        let y = start_y.saturating_add(index as u16);
+        if y >= inner.y.saturating_add(inner.height) {
+            break;
+        }
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            },
+        );
+    }
+}
+
+fn inline_command_popup_rows(
+    suggestions: &[SlashCommandSpec],
+    selected_idx: usize,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            let is_selected = index == selected_idx;
+            let marker = if is_selected { "› " } else { "  " };
+            let name_style = if is_selected {
+                theme::prompt()
+            } else {
+                theme::panel_title()
+            };
+            let available = width
+                .saturating_sub(UnicodeWidthStr::width(marker) as u16)
+                .max(1);
+            let name_width = UnicodeWidthStr::width(suggestion.name);
+            let gap = 2usize;
+            let description_width =
+                available.saturating_sub((name_width + gap) as u16).max(0) as usize;
+            let description = truncate_to_width(suggestion.description, description_width);
+            let mut spans = vec![
+                Span::styled(
+                    marker,
+                    if is_selected {
+                        theme::prompt()
+                    } else {
+                        theme::muted()
+                    },
+                ),
+                Span::styled(suggestion.name, name_style),
+            ];
+            if !description.is_empty() {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(description, theme::muted()));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn inline_command_popup_height(suggestions: &[SlashCommandSpec], width: u16) -> u16 {
+    let width = width.max(1);
+    let rows = suggestions
+        .iter()
+        .map(|suggestion| {
+            let marker_width = 2usize;
+            let name_width = UnicodeWidthStr::width(suggestion.name);
+            let available = width
+                .saturating_sub((marker_width + name_width + 2) as u16)
+                .max(1) as usize;
+            let description = truncate_to_width(suggestion.description, available);
+            let mut row_lines = 1usize;
+            if !description.is_empty() {
+                let wrapped = wrap(&description, Options::new(available).break_words(false));
+                row_lines = wrapped.len().max(1);
+            }
+            row_lines
+        })
+        .sum::<usize>();
+    rows.clamp(3, 8) as u16
+}
+
+fn truncate_to_width(value: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let mut rendered = String::new();
+    let mut width = 0usize;
+    for ch in value.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch)
+            .unwrap_or(1)
+            .max(1);
+        if width + ch_width > max_width {
+            break;
+        }
+        rendered.push(ch);
+        width += ch_width;
+    }
+    rendered
+}
+
 fn inline_model_panel_height(entries: &[ModelListEntry]) -> u16 {
     entries.len().saturating_mul(2).saturating_add(1).min(8) as u16
+}
+
+fn inline_bottom_region_height(app: &TuiApp, width: u16) -> u16 {
+    if app.aux_panel.is_some() {
+        return inline_aux_panel_height(app);
+    }
+
+    let suggestions = app.slash_suggestions();
+    if suggestions.is_empty() {
+        return 0;
+    }
+
+    inline_command_popup_height(&suggestions, width.max(1))
+}
+
+fn inline_layout_areas(area: Rect, popup_height: u16) -> (Rect, Rect) {
+    let prompt_height = 1.min(area.height);
+    let popup_height = popup_height.min(area.height.saturating_sub(prompt_height));
+    let prompt_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: prompt_height,
+    };
+    let popup_area = Rect {
+        x: area.x,
+        y: prompt_area.y.saturating_add(prompt_area.height),
+        width: area.width,
+        height: popup_height,
+    };
+    (prompt_area, popup_area)
 }
 
 struct InlineAuxPanel<'a> {
@@ -418,7 +630,7 @@ struct InlineAuxPanel<'a> {
 
 fn inline_aux_panel(app: &TuiApp) -> Option<InlineAuxPanel<'_>> {
     let panel = app.aux_panel.as_ref()?;
-    let height = aux_panel_height(app);
+    let height = inline_aux_panel_height(app);
     if height == 0 {
         return None;
     }
@@ -431,61 +643,139 @@ fn inline_aux_panel(app: &TuiApp) -> Option<InlineAuxPanel<'_>> {
 }
 
 fn render_inline_aux_panel(frame: &mut Frame, area: Rect, app: &TuiApp, panel: InlineAuxPanel<'_>) {
+    let rows = inline_aux_panel_rows(app, &panel);
+    let start_y = area
+        .y
+        .saturating_add(area.height.saturating_sub(rows.len() as u16));
+
+    for (index, line) in rows.into_iter().enumerate() {
+        let y = start_y.saturating_add(index as u16);
+        if y >= area.y.saturating_add(area.height) {
+            break;
+        }
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect {
+                x: area.x.saturating_add(2),
+                y,
+                width: area.width.saturating_sub(2),
+                height: 1,
+            },
+        );
+    }
+}
+
+fn inline_aux_panel_rows(app: &TuiApp, panel: &InlineAuxPanel<'_>) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
+    if !panel.title.is_empty() {
+        rows.push(Line::from(vec![Span::styled(
+            format!("  {}", panel.title),
+            theme::muted(),
+        )]));
+    }
+
     match panel.content {
         AuxPanelContent::Text(body) => {
-            let text = Paragraph::new(body.clone())
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(theme::overlay_border())
-                        .title(format!(" {} ", panel.title))
-                        .padding(Padding::horizontal(1)),
-                )
-                .wrap(Wrap { trim: false });
-            frame.render_widget(text, area);
+            rows.extend(body.lines().map(|line| Line::from(format!("  {line}"))));
         }
         AuxPanelContent::SessionList(entries) => {
-            let items = session_items(entries);
-            let mut state = ListState::default();
-            if !entries.is_empty() {
-                state.select(Some(
-                    app.aux_panel_selection.min(entries.len().saturating_sub(1)),
-                ));
+            for (index, entry) in entries.iter().enumerate() {
+                let marker = if index == app.aux_panel_selection {
+                    "› "
+                } else {
+                    "  "
+                };
+                let tag = if entry.is_active { "current" } else { "saved" };
+                rows.push(Line::from(vec![
+                    Span::styled(
+                        marker,
+                        if marker == "› " {
+                            theme::prompt()
+                        } else {
+                            theme::muted()
+                        },
+                    ),
+                    Span::styled(entry.title.clone(), theme::panel_title()),
+                    Span::raw("  "),
+                    Span::styled(format!("[{tag}]"), theme::muted()),
+                ]));
+                rows.push(Line::from(vec![
+                    "  ".into(),
+                    Span::styled(entry.session_id.to_string(), theme::muted()),
+                    Span::raw("  "),
+                    Span::styled(entry.updated_at.clone(), theme::muted()),
+                ]));
             }
-            let list = List::new(items)
-                .block(overlay_block(&panel.title, false))
-                .highlight_style(theme::selected().add_modifier(Modifier::BOLD))
-                .highlight_symbol("› ");
-            frame.render_stateful_widget(list, area, &mut state);
-        }
-        AuxPanelContent::ThinkingList(entries) => {
-            let items = thinking_items(entries);
-            let mut state = ListState::default();
-            if !entries.is_empty() {
-                state.select(Some(
-                    app.aux_panel_selection.min(entries.len().saturating_sub(1)),
-                ));
-            }
-            let list = List::new(items)
-                .block(overlay_block(&panel.title, false))
-                .highlight_style(theme::selected().add_modifier(Modifier::BOLD))
-                .highlight_symbol("› ");
-            frame.render_stateful_widget(list, area, &mut state);
         }
         AuxPanelContent::ModelList(entries) => {
-            let items = model_items(app, entries);
-            let mut state = ListState::default();
-            if !entries.is_empty() {
-                state.select(Some(
-                    app.aux_panel_selection.min(entries.len().saturating_sub(1)),
-                ));
+            for (index, entry) in entries.iter().enumerate() {
+                let marker = if index == app.aux_panel_selection {
+                    "› "
+                } else {
+                    "  "
+                };
+                let mut first_row = vec![
+                    Span::styled(
+                        marker,
+                        if marker == "› " {
+                            theme::prompt()
+                        } else {
+                            theme::muted()
+                        },
+                    ),
+                    Span::styled(
+                        entry.display_name.clone(),
+                        if entry.is_current {
+                            Style::new().add_modifier(Modifier::BOLD)
+                        } else {
+                            theme::panel_title()
+                        },
+                    ),
+                ];
+                if entry.is_current {
+                    first_row.push(Span::raw("  "));
+                    first_row.push(Span::styled("current", theme::muted()));
+                }
+                rows.push(Line::from(first_row));
+                if let Some(description) = entry.description.as_deref()
+                    && !description.trim().is_empty()
+                {
+                    rows.push(Line::from(vec![
+                        "  ".into(),
+                        Span::styled(description.to_string(), theme::muted()),
+                    ]));
+                }
             }
-            let list = List::new(items)
-                .highlight_style(theme::selected().add_modifier(Modifier::BOLD))
-                .highlight_symbol("› ");
-            frame.render_stateful_widget(list, area, &mut state);
+        }
+        AuxPanelContent::ThinkingList(entries) => {
+            for (index, entry) in entries.iter().enumerate() {
+                let marker = if index == app.aux_panel_selection {
+                    "› "
+                } else {
+                    "  "
+                };
+                rows.push(Line::from(vec![
+                    Span::styled(
+                        marker,
+                        if marker == "› " {
+                            theme::prompt()
+                        } else {
+                            theme::muted()
+                        },
+                    ),
+                    Span::styled(entry.label.clone(), theme::panel_title()),
+                    Span::raw("  "),
+                    Span::styled(format!("[{}]", entry.value), theme::muted()),
+                ]));
+                rows.push(Line::from(vec![
+                    "  ".into(),
+                    Span::styled(entry.description.clone(), theme::muted()),
+                ]));
+            }
         }
     }
+
+    rows
 }
 
 fn overlay_block(title: &str, hide_title: bool) -> Block<'static> {
@@ -729,6 +1019,51 @@ fn thinking_panel_height(entries: &[ThinkingListEntry]) -> u16 {
         .clamp(4, MAX_LIST_OVERLAY_HEIGHT as usize) as u16
 }
 
+fn inline_text_panel_height(body: &str, title: &str) -> u16 {
+    body.lines()
+        .count()
+        .saturating_add(usize::from(!title.is_empty()))
+        .clamp(2, MAX_TEXT_OVERLAY_HEIGHT as usize) as u16
+}
+
+fn inline_session_panel_height(entries: &[crate::events::SessionListEntry], title: &str) -> u16 {
+    entries
+        .len()
+        .saturating_mul(2)
+        .saturating_add(usize::from(!title.is_empty()))
+        .clamp(2, MAX_LIST_OVERLAY_HEIGHT as usize) as u16
+}
+
+fn inline_thinking_panel_height(entries: &[ThinkingListEntry], title: &str) -> u16 {
+    entries
+        .len()
+        .saturating_mul(2)
+        .saturating_add(usize::from(!title.is_empty()))
+        .clamp(2, MAX_LIST_OVERLAY_HEIGHT as usize) as u16
+}
+
+fn inline_aux_panel_height(app: &TuiApp) -> u16 {
+    let Some(panel) = app.aux_panel.as_ref() else {
+        return 0;
+    };
+    if app.show_model_onboarding {
+        return 0;
+    }
+
+    match &panel.content {
+        AuxPanelContent::Text(body) => inline_text_panel_height(body, &panel.title),
+        AuxPanelContent::SessionList(entries) => inline_session_panel_height(entries, &panel.title),
+        AuxPanelContent::ThinkingList(entries) => {
+            inline_thinking_panel_height(entries, &panel.title)
+        }
+        AuxPanelContent::ModelList(entries) => entries
+            .len()
+            .saturating_mul(2)
+            .saturating_add(usize::from(!panel.title.is_empty()))
+            .clamp(2, 8) as u16,
+    }
+}
+
 fn aux_panel_height(app: &TuiApp) -> u16 {
     let Some(panel) = app.aux_panel.as_ref() else {
         return 0;
@@ -749,7 +1084,10 @@ fn aux_panel_height(app: &TuiApp) -> u16 {
 mod tests {
     use ratatui::layout::Rect;
 
-    use super::{bottom_popup_area, centered_content_area};
+    use super::{
+        SlashCommandSpec, bottom_popup_area, centered_content_area, inline_command_popup_rows,
+        inline_layout_areas,
+    };
 
     #[test]
     fn centers_wide_layouts() {
@@ -761,5 +1099,31 @@ mod tests {
     fn bottom_popup_stays_inside_transcript_area() {
         let area = bottom_popup_area(Rect::new(10, 5, 90, 18), 20, 12);
         assert_eq!(area, Rect::new(24, 9, 76, 14));
+    }
+
+    #[test]
+    fn slash_popup_rows_use_codex_style_markers() {
+        let rows = inline_command_popup_rows(
+            &[SlashCommandSpec {
+                name: "/model",
+                description: "Show or change the active model",
+            }],
+            0,
+            72,
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].spans[0].content, "› ");
+        assert_eq!(rows[0].spans[1].content, "/model");
+        assert_eq!(rows[0].spans[2].content, "  ");
+        assert!(rows[0].spans[3].content.contains("Show or change"));
+    }
+
+    #[test]
+    fn inline_layout_stacks_prompt_above_popup_inside_viewport() {
+        let (prompt_area, popup_area) = inline_layout_areas(Rect::new(0, 0, 80, 5), 4);
+
+        assert_eq!(prompt_area, Rect::new(0, 0, 80, 1));
+        assert_eq!(popup_area, Rect::new(0, 1, 80, 4));
     }
 }
