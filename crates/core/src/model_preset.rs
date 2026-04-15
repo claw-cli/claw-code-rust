@@ -15,11 +15,11 @@
 //! - turn execution should consume `Model`, not `ModelPreset`
 //! - loading policy and catalog access live in `model_catalog.rs`; this file only defines the raw shape
 //!
+use clawcr_protocol::ProviderFamily;
 use clawcr_protocol::{
     InputModality, Model, ReasoningEffort, ThinkingCapability, ThinkingImplementation,
     TruncationPolicyConfig,
 };
-use clawcr_provider::ProviderFamily;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

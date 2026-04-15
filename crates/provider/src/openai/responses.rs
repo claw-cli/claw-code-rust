@@ -2,6 +2,7 @@ use std::{collections::HashMap, pin::Pin};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use clawcr_protocol::{ModelRequest, RequestContent};
 use futures::{Stream, StreamExt};
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -10,8 +11,8 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use crate::{
-    ModelProviderSDK, ModelRequest, ModelResponse, RequestContent, ResponseContent, ResponseExtra,
-    ResponseMetadata, StopReason, StreamEvent, Usage, merge_extra_body,
+    ModelProviderSDK, ModelResponse, ResponseContent, ResponseExtra, ResponseMetadata, StopReason,
+    StreamEvent, Usage, merge_extra_body,
 };
 
 use super::capabilities::{OpenAITransport, resolve_request_profile};
@@ -475,14 +476,14 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
 
 #[cfg(test)]
 mod tests {
+    use clawcr_protocol::{
+        ModelRequest, RequestContent, RequestMessage, SamplingControls, ToolDefinition,
+    };
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
     use super::parse_response;
-    use crate::{
-        ModelRequest, RequestContent, RequestMessage, ResponseContent, ResponseExtra,
-        SamplingControls, ToolDefinition, openai::responses::build_request,
-    };
+    use crate::{ResponseContent, ResponseExtra, openai::responses::build_request};
 
     #[test]
     fn debug_request_body_includes_reasoning_and_tools() {

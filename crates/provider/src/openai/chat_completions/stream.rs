@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, pin::Pin};
 
 use anyhow::{Context, Result};
+use clawcr_protocol::ModelRequest;
 use futures::{Stream, StreamExt};
 use reqwest_eventsource::{Event, EventSource};
 use serde::Deserialize;
@@ -14,8 +15,7 @@ use super::{
     parse_tool_use,
 };
 use crate::{
-    ModelRequest, ModelResponse, ResponseContent, ResponseExtra, ResponseMetadata, StopReason,
-    StreamEvent, Usage,
+    ModelResponse, ResponseContent, ResponseExtra, ResponseMetadata, StopReason, StreamEvent, Usage,
 };
 
 /// <https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events>

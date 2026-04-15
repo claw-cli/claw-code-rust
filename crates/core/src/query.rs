@@ -2,15 +2,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clawcr_protocol::ResolvedThinkingRequest;
+use clawcr_protocol::{ModelRequest, ResolvedThinkingRequest, SamplingControls};
 use futures::StreamExt;
 use serde_json::json;
 use tokio::time::sleep;
 use tracing::{debug, info, info_span, warn};
 
-use clawcr_provider::{
-    ModelProviderSDK, ModelRequest, ResponseContent, SamplingControls, StopReason, StreamEvent,
-};
+use clawcr_provider::{ModelProviderSDK, ResponseContent, StopReason, StreamEvent};
 use clawcr_tools::{ToolCall, ToolContext, ToolOrchestrator, ToolRegistry};
 
 use crate::{AgentError, ContentBlock, Message, Role, SessionState, TurnConfig};
@@ -588,13 +586,12 @@ mod tests {
 
     use anyhow::Result;
     use async_trait::async_trait;
+    use clawcr_protocol::ModelRequest;
+    use clawcr_protocol::ProviderFamily;
     use futures::Stream;
     use serde_json::json;
 
-    use clawcr_provider::{
-        ModelRequest, ModelResponse, ProviderFamily, ResponseContent, StopReason, StreamEvent,
-        Usage,
-    };
+    use clawcr_provider::{ModelResponse, ResponseContent, StopReason, StreamEvent, Usage};
     use clawcr_safety::legacy_permissions::PermissionMode;
     use clawcr_tools::{Tool, ToolOrchestrator, ToolOutput, ToolRegistry};
 

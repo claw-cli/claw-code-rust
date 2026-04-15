@@ -2,6 +2,7 @@ use std::{collections::HashMap, pin::Pin};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use clawcr_protocol::{ModelRequest, ProviderFamily, RequestContent, RequestMessage};
 use futures::{Stream, StreamExt};
 use reqwest::Client;
 use reqwest::header::{CONTENT_TYPE, HeaderValue};
@@ -12,9 +13,8 @@ use tracing::debug;
 
 use super::AnthropicAIRole;
 use crate::{
-    ModelProviderSDK, ModelRequest, ModelResponse, ProviderAdapter, ProviderCapabilities,
-    ProviderFamily, RequestContent, ResponseContent, ResponseExtra, ResponseMetadata, StopReason,
-    StreamEvent, Usage, merge_extra_body,
+    ModelProviderSDK, ModelResponse, ProviderAdapter, ProviderCapabilities, ResponseContent,
+    ResponseExtra, ResponseMetadata, StopReason, StreamEvent, Usage, merge_extra_body,
 };
 
 /// <https://platform.claude.com/docs/en/api/messages>
@@ -727,7 +727,7 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
     })
 }
 
-fn build_message(message: &crate::RequestMessage) -> AnthropicInputMessage {
+fn build_message(message: &RequestMessage) -> AnthropicInputMessage {
     let role = message
         .role
         .parse::<AnthropicAIRole>()
@@ -883,14 +883,14 @@ fn build_thinking(level: &str) -> Option<AnthropicThinkingConfig> {
 
 #[cfg(test)]
 mod tests {
+    use clawcr_protocol::{
+        ModelRequest, RequestContent, RequestMessage, SamplingControls, ToolDefinition,
+    };
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
     use super::{build_request, parse_response, parse_stop_reason};
-    use crate::{
-        ModelRequest, RequestContent, RequestMessage, ResponseContent, ResponseExtra,
-        SamplingControls, StopReason, ToolDefinition,
-    };
+    use crate::{ResponseContent, ResponseExtra, StopReason};
 
     #[test]
     fn build_request_includes_sampling_tools_and_thinking() {

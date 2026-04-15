@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clawcr_core::{PresetModelCatalog, load_config, resolve_provider_settings};
-use clawcr_provider::ProviderFamily;
+use clawcr_protocol::ProviderFamily;
 use clawcr_tui::{InteractiveTuiConfig, SavedModelEntry, TerminalMode, run_interactive_tui};
 
 /// Runs the interactive coding-agent entrypoint.

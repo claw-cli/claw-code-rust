@@ -1,7 +1,6 @@
-use clawcr_provider::{
-    ModelRequest, RequestContent, RequestMessage, ResponseContent, SamplingControls,
-};
+use clawcr_provider::ResponseContent;
 
+use clawcr_protocol::{ModelRequest, RequestContent, RequestMessage, SamplingControls};
 /// Derives a cheap deterministic provisional session title from the first user prompt.
 pub(crate) fn derive_provisional_title(input: &str) -> Option<String> {
     let mut text = strip_code_fences(input);

@@ -9,13 +9,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::debug;
 mod stream;
+use clawcr_protocol::{ModelRequest, ProviderFamily, RequestContent};
 
 use super::capabilities::{OpenAIReasoningMode, OpenAITransport, resolve_request_profile};
 use super::shared::{reasoning_value, request_role, tool_definitions};
 use crate::{
-    ModelProviderSDK, ModelRequest, ModelResponse, ProviderAdapter, ProviderCapabilities,
-    ProviderFamily, RequestContent, ResponseContent, ResponseExtra, ResponseMetadata, StopReason,
-    StreamEvent, Usage, merge_extra_body,
+    ModelProviderSDK, ModelResponse, ProviderAdapter, ProviderCapabilities, ResponseContent,
+    ResponseExtra, ResponseMetadata, StopReason, StreamEvent, Usage, merge_extra_body,
 };
 
 /// OpenAI chat-completion provider backed by the official HTTP API.
@@ -1049,6 +1049,9 @@ impl ProviderAdapter for OpenAIProvider {
 
 #[cfg(test)]
 mod tests {
+    use clawcr_protocol::{
+        ModelRequest, RequestContent, RequestMessage, SamplingControls, ToolDefinition,
+    };
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
@@ -1056,8 +1059,7 @@ mod tests {
     use super::super::shared::reasoning_effort;
     use super::{parse_finish_reason, parse_response, parse_usage};
     use crate::{
-        ModelRequest, RequestContent, RequestMessage, ResponseContent, ResponseExtra,
-        SamplingControls, StopReason, ToolDefinition, openai::chat_completions::build_request,
+        ResponseContent, ResponseExtra, StopReason, openai::chat_completions::build_request,
     };
 
     #[test]

@@ -66,7 +66,7 @@ impl SessionState {
         self.messages.push(msg);
     }
 
-    pub fn to_request_messages(&self) -> Vec<clawcr_provider::RequestMessage> {
+    pub fn to_request_messages(&self) -> Vec<clawcr_protocol::RequestMessage> {
         self.messages
             .iter()
             .map(|m| m.to_request_message())
