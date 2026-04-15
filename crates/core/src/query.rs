@@ -14,7 +14,7 @@ use tracing::{debug, info, info_span, warn};
 use clawcr_provider::ModelProviderSDK;
 use clawcr_tools::{ToolCall, ToolContext, ToolOrchestrator, ToolRegistry};
 
-use crate::{AgentError, ContentBlock, Message, Role, SessionState, TurnConfig};
+use crate::{AgentError, ContentBlock, Message, Role, SessionState, TurnConfig, TurnToolsMode};
 
 /// Events emitted during a query for the caller (CLI/UI) to observe.
 #[derive(Debug, Clone)]
@@ -323,11 +323,15 @@ pub async fn query(
         info!("starting turn");
 
         // Build model request
-        let system = build_system_prompt(
-            &turn_config.model.base_instructions,
-            &memory_content,
-            &session.cwd,
-        );
+        let system = match &turn_config.system_prompt {
+            crate::SystemPromptMode::Default => build_system_prompt(
+                &turn_config.model.base_instructions,
+                &memory_content,
+                &session.cwd,
+            ),
+            crate::SystemPromptMode::Inline { text } => text.clone(),
+            crate::SystemPromptMode::Omit => String::new(),
+        };
 
         // resolve thinking request parameter
         let ResolvedThinkingRequest {
@@ -353,7 +357,10 @@ pub async fn query(
                 .map_or(session.config.token_budget.max_output_tokens, |value| {
                     value as usize
                 }),
-            tools: Some(registry.tool_definitions()),
+            tools: match turn_config.tools {
+                TurnToolsMode::Include => Some(registry.tool_definitions()),
+                TurnToolsMode::Omit => None,
+            },
             sampling: SamplingControls {
                 temperature: turn_config.model.temperature.map(f64::from),
                 top_p: turn_config.model.top_p.map(f64::from),
@@ -830,6 +837,8 @@ mod tests {
             &mut session,
             &TurnConfig {
                 model: Model::default(),
+                system_prompt: crate::SystemPromptMode::Default,
+                tools: crate::TurnToolsMode::Include,
                 thinking_selection: None,
             },
             &SingleToolUseProvider {
@@ -928,6 +937,8 @@ mod tests {
             &mut session,
             &TurnConfig {
                 model,
+                system_prompt: crate::SystemPromptMode::Default,
+                tools: crate::TurnToolsMode::Include,
                 thinking_selection: Some("enabled".into()),
             },
             &provider,
@@ -942,6 +953,39 @@ mod tests {
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].model, "kimi-k2.5-thinking");
         assert_eq!(captured[0].thinking, None);
+    }
+
+    #[tokio::test]
+    async fn query_omits_system_prompt_and_tools_when_turn_config_requests_it() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = CapturingProvider {
+            requests: Arc::clone(&requests),
+        };
+        let registry = Arc::new(ToolRegistry::new());
+        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("hello"));
+
+        query(
+            &mut session,
+            &TurnConfig {
+                model: Model::default(),
+                system_prompt: crate::SystemPromptMode::Omit,
+                tools: crate::TurnToolsMode::Omit,
+                thinking_selection: None,
+            },
+            &provider,
+            registry,
+            &orchestrator,
+            None,
+        )
+        .await
+        .expect("query should succeed without a system prompt");
+
+        let captured = requests.lock().expect("lock requests");
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].system, None);
+        assert!(captured[0].tools.is_none());
     }
 
     #[tokio::test]
@@ -1004,6 +1048,8 @@ mod tests {
             &mut session,
             &TurnConfig {
                 model: Model::default(),
+                system_prompt: crate::SystemPromptMode::Default,
+                tools: crate::TurnToolsMode::Include,
                 thinking_selection: None,
             },
             &ReasoningProvider,

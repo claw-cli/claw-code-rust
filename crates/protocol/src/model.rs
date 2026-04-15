@@ -184,11 +184,11 @@ pub struct Model {
     /// Whether the model supports original-resolution image detail.
     pub supports_image_detail_original: bool,
     /// Default temperature to use when the model does not override it.
-    pub temperature: Option<f32>,
+    pub temperature: Option<f64>,
     /// Default nucleus sampling value to use when the model does not override it.
-    pub top_p: Option<f32>,
+    pub top_p: Option<f64>,
     /// Default top-k sampling value to use when the model does not override it.
-    pub top_k: Option<f32>,
+    pub top_k: Option<f64>,
     /// Default maximum token limit for responses from this model.
     pub max_tokens: Option<u32>,
 }
