@@ -63,7 +63,7 @@ pub(super) async fn completion_stream(
     request: ModelRequest,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
     let body = build_request(&request, true);
-    tracing::info!(
+    tracing::debug!(
         provider = "openai",
         api_base = %provider.base_url,
         model = %request.model,

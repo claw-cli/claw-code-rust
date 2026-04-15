@@ -668,12 +668,9 @@ impl ServerRuntime {
                 .model
                 .as_deref()
                 .or(session.summary.resolved_model.as_deref());
-            let turn_config = self.deps.resolve_turn_config(
-                requested_model,
-                params.system_prompt.clone(),
-                params.tools.clone(),
-                params.thinking.clone(),
-            );
+            let turn_config = self
+                .deps
+                .resolve_turn_config(requested_model, params.thinking.clone());
             let resolved_request = turn_config
                 .model
                 .resolve_thinking_selection(turn_config.thinking_selection.as_deref());

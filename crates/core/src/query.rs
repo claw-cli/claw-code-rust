@@ -14,7 +14,7 @@ use tracing::{debug, info, info_span, warn};
 use clawcr_provider::ModelProviderSDK;
 use clawcr_tools::{ToolCall, ToolContext, ToolOrchestrator, ToolRegistry};
 
-use crate::{AgentError, ContentBlock, Message, Role, SessionState, TurnConfig, TurnToolsMode};
+use crate::{AgentError, ContentBlock, Message, Model, Role, SessionState, TurnConfig};
 
 /// Events emitted during a query for the caller (CLI/UI) to observe.
 #[derive(Debug, Clone)]
@@ -323,15 +323,11 @@ pub async fn query(
         info!("starting turn");
 
         // Build model request
-        let system = match &turn_config.system_prompt {
-            crate::SystemPromptMode::Default => build_system_prompt(
-                &turn_config.model.base_instructions,
-                &memory_content,
-                &session.cwd,
-            ),
-            crate::SystemPromptMode::Inline { text } => text.clone(),
-            crate::SystemPromptMode::Omit => String::new(),
-        };
+        let system = build_system_prompt(
+            &turn_config.model.base_instructions,
+            &memory_content,
+            &session.cwd,
+        );
 
         // resolve thinking request parameter
         let ResolvedThinkingRequest {
@@ -357,13 +353,10 @@ pub async fn query(
                 .map_or(session.config.token_budget.max_output_tokens, |value| {
                     value as usize
                 }),
-            tools: match turn_config.tools {
-                TurnToolsMode::Include => Some(registry.tool_definitions()),
-                TurnToolsMode::Omit => None,
-            },
+            tools: Some(registry.tool_definitions()),
             sampling: SamplingControls {
-                temperature: turn_config.model.temperature.map(f64::from),
-                top_p: turn_config.model.top_p.map(f64::from),
+                temperature: turn_config.model.temperature,
+                top_p: turn_config.model.top_p,
                 top_k: turn_config.model.top_k.map(|value| value as u32),
             },
             thinking: request_thinking,
@@ -638,6 +631,67 @@ pub async fn query(
     }
 }
 
+/// Sends a minimal provider probe request used by onboarding and configuration checks.
+pub async fn test_model_connection(
+    provider: &dyn ModelProviderSDK,
+    model: &Model,
+    prompt: &str,
+) -> Result<String, AgentError> {
+    let ResolvedThinkingRequest {
+        request_model,
+        request_thinking,
+        extra_body,
+        effective_reasoning_effort: _,
+    } = model.resolve_thinking_selection(None);
+    let request = ModelRequest {
+        model: request_model,
+        system: None,
+        messages: vec![clawcr_protocol::RequestMessage {
+            role: "user".to_string(),
+            content: vec![clawcr_protocol::RequestContent::Text {
+                text: prompt.to_string(),
+            }],
+        }],
+        max_tokens: model.max_tokens.map_or(64, |value| value as usize),
+        tools: None,
+        sampling: SamplingControls {
+            temperature: model.temperature,
+            top_p: model.top_p,
+            top_k: model.top_k.map(|value| value as u32),
+        },
+        thinking: request_thinking,
+        extra_body,
+    };
+    let mut stream = provider.completion_stream(request).await?;
+    let mut reply_preview = String::new();
+    while let Some(event) = stream.next().await {
+        match event? {
+            StreamEvent::TextDelta { text, .. } => reply_preview.push_str(&text),
+            StreamEvent::MessageDone { response } => {
+                if reply_preview.trim().is_empty() {
+                    reply_preview = response
+                        .content
+                        .into_iter()
+                        .find_map(|content| match content {
+                            ResponseContent::Text(text) => Some(text),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    let preview = reply_preview.trim();
+    if preview.is_empty() {
+        return Err(AgentError::Provider(anyhow::anyhow!(
+            "provider validation completed without a model reply"
+        )));
+    }
+    Ok(preview.to_string())
+}
+
 fn retry_backoff_duration(attempt: usize) -> Duration {
     let exponent = attempt.saturating_sub(1).min(10) as u32;
     let multiplier = 2u64.pow(exponent);
@@ -663,7 +717,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
-    use super::{QueryEvent, query};
+    use super::{QueryEvent, query, test_model_connection};
     use crate::{
         ContentBlock, Message, Model, ReasoningEffort, Role, SessionConfig, SessionState,
         ThinkingCapability, ThinkingImplementation, ThinkingVariant, ThinkingVariantConfig,
@@ -837,8 +891,6 @@ mod tests {
             &mut session,
             &TurnConfig {
                 model: Model::default(),
-                system_prompt: crate::SystemPromptMode::Default,
-                tools: crate::TurnToolsMode::Include,
                 thinking_selection: None,
             },
             &SingleToolUseProvider {
@@ -937,8 +989,6 @@ mod tests {
             &mut session,
             &TurnConfig {
                 model,
-                system_prompt: crate::SystemPromptMode::Default,
-                tools: crate::TurnToolsMode::Include,
                 thinking_selection: Some("enabled".into()),
             },
             &provider,
@@ -956,36 +1006,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_omits_system_prompt_and_tools_when_turn_config_requests_it() {
+    async fn test_model_connection_sends_minimal_request() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let provider = CapturingProvider {
             requests: Arc::clone(&requests),
         };
-        let registry = Arc::new(ToolRegistry::new());
-        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
-        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
-        session.push_message(Message::user("hello"));
-
-        query(
-            &mut session,
-            &TurnConfig {
-                model: Model::default(),
-                system_prompt: crate::SystemPromptMode::Omit,
-                tools: crate::TurnToolsMode::Omit,
-                thinking_selection: None,
-            },
-            &provider,
-            registry,
-            &orchestrator,
-            None,
-        )
-        .await
-        .expect("query should succeed without a system prompt");
+        let model = Model {
+            slug: "glm-4.5".into(),
+            top_p: Some(0.95),
+            ..Model::default()
+        };
+        let preview = test_model_connection(&provider, &model, "Reply with OK only.")
+            .await
+            .expect("probe request should succeed");
 
         let captured = requests.lock().expect("lock requests");
+        assert_eq!(preview, "done");
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].system, None);
         assert!(captured[0].tools.is_none());
+        assert_eq!(captured[0].messages.len(), 1);
+        assert_eq!(captured[0].sampling.top_p, Some(0.95));
     }
 
     #[tokio::test]
@@ -1048,8 +1089,6 @@ mod tests {
             &mut session,
             &TurnConfig {
                 model: Model::default(),
-                system_prompt: crate::SystemPromptMode::Default,
-                tools: crate::TurnToolsMode::Include,
                 thinking_selection: None,
             },
             &ReasoningProvider,

@@ -1188,6 +1188,33 @@ mod tests {
     }
 
     #[test]
+    fn debug_request_body_preserves_top_p_precision() {
+        let request = ModelRequest {
+            model: "glm-5.1".to_string(),
+            system: None,
+            messages: vec![RequestMessage {
+                role: "user".to_string(),
+                content: vec![RequestContent::Text {
+                    text: "Reply with OK only.".to_string(),
+                }],
+            }],
+            max_tokens: 8192,
+            tools: None,
+            sampling: SamplingControls {
+                temperature: Some(1.0),
+                top_p: Some(0.95),
+                top_k: None,
+            },
+            thinking: Some("enabled".to_string()),
+            extra_body: None,
+        };
+
+        let body = build_request(&request, true);
+
+        assert_eq!(body["top_p"], json!(0.95));
+    }
+
+    #[test]
     fn parse_response_extracts_text_tool_calls_and_usage() {
         let response = parse_response(json!({
             "id": "chatcmpl-123",

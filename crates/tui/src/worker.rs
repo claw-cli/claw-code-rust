@@ -6,12 +6,16 @@ use tokio::{
     task::{JoinError, JoinHandle},
 };
 
-use clawcr_core::{SessionId, TurnId, TurnStatus};
+use clawcr_core::{
+    Model, ModelCatalog, PresetModelCatalog, SessionId, TurnId, TurnStatus, test_model_connection,
+};
+use clawcr_protocol::ProviderFamily;
+use clawcr_provider::{ModelProviderSDK, anthropic::AnthropicProvider, openai::OpenAIProvider};
 use clawcr_server::{
     InputItem, ItemEnvelope, ItemEventPayload, ItemKind, ServerEvent, SessionHistoryItem,
     SessionHistoryItemKind, SessionListParams, SessionResumeParams, SessionStartParams,
-    SessionTitleUpdateParams, StdioServerClient, StdioServerClientConfig, SystemPromptMode,
-    TurnEventPayload, TurnInterruptParams, TurnStartParams, TurnToolsMode,
+    SessionTitleUpdateParams, StdioServerClient, StdioServerClientConfig, TurnEventPayload,
+    TurnInterruptParams, TurnStartParams,
 };
 
 use crate::events::{SessionListEntry, TranscriptItem, TranscriptItemKind, WorkerEvent};
@@ -52,6 +56,7 @@ enum OperationCommand {
     },
     /// Validates provider settings with a temporary probe request.
     ValidateProvider {
+        provider: ProviderFamily,
         model: String,
         base_url: Option<String>,
         api_key: Option<String>,
@@ -133,12 +138,14 @@ impl QueryWorkerHandle {
     /// Validates provider settings with a temporary probe request.
     pub(crate) fn validate_provider(
         &self,
+        provider: ProviderFamily,
         model: String,
         base_url: Option<String>,
         api_key: Option<String>,
     ) -> Result<()> {
         self.command_tx
             .send(OperationCommand::ValidateProvider {
+                provider,
                 model,
                 base_url,
                 api_key,
@@ -260,8 +267,6 @@ async fn run_worker_inner(
                             session_id: active_session_id,
                             input: vec![InputItem::Text { text: prompt }],
                             model: Some(model.clone()),
-                            system_prompt: SystemPromptMode::Default,
-                            tools: TurnToolsMode::Include,
                             thinking: thinking_selection.clone(),
                             sandbox: None,
                             approval_policy: None,
@@ -288,13 +293,13 @@ async fn run_worker_inner(
                         thinking_selection = next_thinking;
                     }
                     Some(OperationCommand::ValidateProvider {
+                        provider,
                         model: next_model,
                         base_url,
                         api_key,
                     }) => {
                         match validate_provider_connection(
-                            &config.cwd,
-                            &server_env,
+                            provider,
                             &next_model,
                             base_url,
                             api_key,
@@ -854,89 +859,76 @@ fn truncate_tool_output(content: &str) -> String {
 }
 
 async fn validate_provider_connection(
-    cwd: &PathBuf,
-    server_env: &[(String, String)],
+    provider: ProviderFamily,
     model: &str,
     base_url: Option<String>,
     api_key: Option<String>,
 ) -> Result<String> {
-    let mut env = server_env.to_vec();
-    apply_env_override(&mut env, "CLAWCR_MODEL", model);
-    apply_optional_env_override(&mut env, "CLAWCR_BASE_URL", base_url);
-    apply_optional_env_override(&mut env, "CLAWCR_API_KEY", api_key);
+    let validation_model = resolve_validation_model(provider, model)?;
+    let validation_provider = build_validation_provider(provider, base_url, api_key)?;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        test_model_connection(
+            validation_provider.as_ref(),
+            &validation_model,
+            "Reply with OK only.",
+        ),
+    )
+    .await
+    .context("provider validation timed out after 20s")?
+    .map_err(Into::into)
+}
 
-    let mut client = spawn_client(cwd, env).await?;
-    let result = async {
-        let _ = client.initialize().await?;
-        let session = client
-            .session_start(SessionStartParams {
-                cwd: cwd.clone(),
-                ephemeral: true,
-                title: None,
-                model: Some(model.to_string()),
-            })
-            .await?;
-        let _ = client
-            .turn_start(TurnStartParams {
-                session_id: session.session_id,
-                input: vec![InputItem::Text {
-                    text: "Reply with OK only.".to_string(),
-                }],
-                model: Some(model.to_string()),
-                system_prompt: SystemPromptMode::Omit,
-                tools: TurnToolsMode::Omit,
-                thinking: None,
-                sandbox: None,
-                approval_policy: None,
-                cwd: None,
-            })
-            .await?;
+fn resolve_validation_model(provider: ProviderFamily, model: &str) -> Result<Model> {
+    let catalog = PresetModelCatalog::load()?;
+    if let Some(entry) = catalog.get(model) {
+        return Ok(entry.clone());
+    }
+    Ok(Model {
+        slug: model.to_string(),
+        provider_family: provider,
+        ..Model::default()
+    })
+}
 
-        let mut reply_preview = String::new();
-        loop {
-            match client.recv_event().await? {
-                Some((method, event)) => match method.as_str() {
-                    "item/agentMessage/delta" => {
-                        if let ServerEvent::ItemDelta { payload, .. } = event {
-                            reply_preview.push_str(&payload.delta);
-                        }
-                    }
-                    "item/completed" => {
-                        if let ServerEvent::ItemCompleted(payload) = event {
-                            if let Some(text) = completed_agent_message_text(&payload) {
-                                if reply_preview.trim().is_empty() {
-                                    reply_preview = text;
-                                }
-                            }
-                        }
-                    }
-                    "turn/failed" => {
-                        let message = if reply_preview.trim().is_empty() {
-                            "provider validation failed".to_string()
-                        } else {
-                            reply_preview.trim().to_string()
-                        };
-                        anyhow::bail!("{message}");
-                    }
-                    "turn/completed" => {
-                        let preview = reply_preview.trim();
-                        if preview.is_empty() {
-                            anyhow::bail!("provider validation completed without a model reply");
-                        }
-                        return Ok(preview.to_string());
-                    }
-                    _ => {}
-                },
-                None => anyhow::bail!("provider validation connection closed unexpectedly"),
-            }
+fn build_validation_provider(
+    provider: ProviderFamily,
+    base_url: Option<String>,
+    api_key: Option<String>,
+) -> Result<std::sync::Arc<dyn ModelProviderSDK>> {
+    match provider {
+        ProviderFamily::Anthropic => {
+            let api_key = api_key.context("anthropic provider requires an API key")?;
+            let base_url = base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string());
+            Ok(std::sync::Arc::new(
+                AnthropicProvider::new(base_url).with_api_key(api_key),
+            ))
         }
-    };
+        ProviderFamily::OpenAI => {
+            let base_url = normalize_openai_base_url(
+                &base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
+            );
+            let provider = if let Some(api_key) = api_key {
+                OpenAIProvider::new(base_url).with_api_key(api_key)
+            } else {
+                OpenAIProvider::new(base_url)
+            };
+            Ok(std::sync::Arc::new(provider))
+        }
+    }
+}
 
-    let outcome = tokio::time::timeout(Duration::from_secs(20), result)
-        .await
-        .context("provider validation timed out after 20s")?;
-    let _ = client.shutdown().await;
-    outcome
+fn normalize_openai_base_url(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    let Some(scheme_sep) = trimmed.find("://") else {
+        return trimmed.to_string();
+    };
+    let has_explicit_path = trimmed[scheme_sep + 3..].contains('/');
+    if has_explicit_path {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
+    }
 }
 
 fn normalize_display_output(content: &str) -> String {

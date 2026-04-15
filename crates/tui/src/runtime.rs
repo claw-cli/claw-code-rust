@@ -532,9 +532,11 @@ impl TuiApp {
             let Some(model) = self.onboarding_selected_model.clone() else {
                 anyhow::bail!("onboarding model selection was lost before validation");
             };
+            let provider = self.onboarding_provider_for_model(&model);
             self.busy = true;
             self.status_message = "Validating provider connection".to_string();
             self.worker.validate_provider(
+                provider,
                 model,
                 self.onboarding_selected_base_url.clone(),
                 self.onboarding_selected_api_key.clone(),

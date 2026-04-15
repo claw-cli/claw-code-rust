@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clawcr_safety::legacy_permissions::PermissionMode;
 
-use crate::{Message, Model, SystemPromptMode, TokenBudget, TurnToolsMode};
+use crate::{Message, Model, TokenBudget};
 
 /// Configuration for a session.
 #[derive(Debug, Clone)]
@@ -24,8 +24,6 @@ impl Default for SessionConfig {
 #[derive(Debug, Clone)]
 pub struct TurnConfig {
     pub model: Model,
-    pub system_prompt: SystemPromptMode,
-    pub tools: TurnToolsMode,
     pub thinking_selection: Option<String>,
 }
 

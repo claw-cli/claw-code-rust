@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Result;
-use clawcr_core::{ModelCatalog, PresetModelCatalog};
+use clawcr_core::PresetModelCatalog;
 use clawcr_protocol::ProviderFamily;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
