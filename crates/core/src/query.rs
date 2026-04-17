@@ -187,7 +187,13 @@ const MICRO_COMPACT_THRESHOLD: usize = 10_000;
 
 fn micro_compact(content: String) -> String {
     if content.len() > MICRO_COMPACT_THRESHOLD {
-        let mut truncated = content[..MICRO_COMPACT_THRESHOLD].to_string();
+        let truncate_at = content
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= MICRO_COMPACT_THRESHOLD)
+            .last()
+            .unwrap_or(0);
+        let mut truncated = content[..truncate_at].to_string();
         truncated.push_str("\n...[truncated]");
         truncated
     } else {
@@ -235,6 +241,8 @@ fn build_system_prompt(base_instructions: &str) -> String {
     sections.join("\n\n")
 }
 
+/// TODO: Here the shell has issue, on windows, it always return cmd.exe, however,
+/// the windows usually powershell
 fn build_environment_context(cwd: &Path) -> String {
     let shell = std::env::var("SHELL")
         .ok()

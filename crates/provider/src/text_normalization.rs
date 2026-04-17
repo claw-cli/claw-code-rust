@@ -96,7 +96,7 @@ fn find_first_tag<'a>(text: &str, tags: &'a [&str]) -> Option<(usize, &'a str)> 
 }
 
 fn earliest_partial_start(text: &str, tags: &[&str]) -> Option<usize> {
-    for start in 0..text.len() {
+    for (start, _) in text.char_indices() {
         let suffix = &text[start..];
         if tags
             .iter()
@@ -148,5 +148,14 @@ mod tests {
                 TaggedTextFragment::Text("after".into()),
             ]
         );
+    }
+
+    #[test]
+    fn parser_does_not_slice_inside_utf8_characters() {
+        let mut parser = TaggedTextParser::default();
+
+        let fragments = parser.consume("现在");
+
+        assert_eq!(fragments, vec![TaggedTextFragment::Text("现在".into())]);
     }
 }

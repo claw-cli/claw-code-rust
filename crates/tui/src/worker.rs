@@ -7,7 +7,8 @@ use tokio::{
 };
 
 use clawcr_core::{
-    Model, ModelCatalog, PresetModelCatalog, SessionId, TurnId, TurnStatus, test_model_connection,
+    Model, ModelCatalog, PresetModelCatalog, ProviderWireApi, SessionId, TurnId, TurnStatus,
+    test_model_connection,
 };
 use clawcr_protocol::ProviderFamily;
 use clawcr_provider::{ModelProviderSDK, anthropic::AnthropicProvider, openai::OpenAIProvider};
@@ -49,6 +50,8 @@ enum OperationCommand {
     SetThinking(Option<String>),
     /// Replace the provider connection settings and restart the server client.
     ReconfigureProvider {
+        /// Provider wire protocol to use for future turns.
+        wire_api: ProviderWireApi,
         /// Model identifier to use for future turns.
         model: String,
         /// Optional provider base URL override.
@@ -126,12 +129,14 @@ impl QueryWorkerHandle {
     /// Reconfigures the provider connection used by the background server client.
     pub(crate) fn reconfigure_provider(
         &self,
+        wire_api: ProviderWireApi,
         model: String,
         base_url: Option<String>,
         api_key: Option<String>,
     ) -> Result<()> {
         self.command_tx
             .send(OperationCommand::ReconfigureProvider {
+                wire_api,
                 model,
                 base_url,
                 api_key,
@@ -334,6 +339,7 @@ async fn run_worker_inner(
                         }
                     }
                 Some(OperationCommand::ReconfigureProvider {
+                    wire_api,
                     model: next_model,
                     base_url,
                     api_key,
@@ -341,6 +347,22 @@ async fn run_worker_inner(
                         // Recreate the client so new provider credentials take effect
                         // without requiring the whole app to restart.
                         model = next_model;
+                        apply_env_override(
+                            &mut server_env,
+                            "CLAWCR_PROVIDER",
+                            wire_api.provider_family().as_str(),
+                        );
+                        apply_env_override(
+                            &mut server_env,
+                            "CLAWCR_WIRE_API",
+                            match wire_api {
+                                ProviderWireApi::OpenAIChatCompletions => {
+                                    "openai_chat_completions"
+                                }
+                                ProviderWireApi::OpenAIResponses => "openai_responses",
+                                ProviderWireApi::AnthropicMessages => "anthropic_messages",
+                            },
+                        );
                         apply_env_override(&mut server_env, "CLAWCR_MODEL", &model);
                         apply_optional_env_override(&mut server_env, "CLAWCR_BASE_URL", base_url);
                         apply_optional_env_override(&mut server_env, "CLAWCR_API_KEY", api_key);

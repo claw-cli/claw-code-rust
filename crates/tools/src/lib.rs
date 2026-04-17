@@ -11,7 +11,10 @@ mod plan;
 mod question;
 mod read;
 mod registry;
+mod runtime;
+mod shell_exec;
 mod skill;
+#[allow(dead_code)]
 mod spec;
 mod task;
 mod todo;
@@ -32,8 +35,8 @@ pub use plan::PlanTool;
 pub use question::QuestionTool;
 pub use read::ReadTool;
 pub use registry::*;
+pub use runtime::*;
 pub use skill::SkillTool;
-pub use spec::*;
 pub use task::TaskTool;
 pub use todo::TodoWriteTool;
 pub use tool::{Tool, ToolOutput, ToolProgressEvent};
@@ -112,5 +115,38 @@ mod tests {
                 tool.name()
             );
         }
+    }
+
+    #[test]
+    fn register_builtin_runtime_tools_populates_registry() {
+        let registry = RuntimeToolRegistry::new();
+        register_builtin_runtime_tools(&registry);
+
+        let expected = [
+            "shell_command",
+            "bash",
+            "read",
+            "write",
+            "glob",
+            "grep",
+            "invalid",
+            "question",
+            "task",
+            "todowrite",
+            "webfetch",
+            "websearch",
+            "skill",
+            "apply_patch",
+            "lsp",
+            "update_plan",
+        ];
+        for name in &expected {
+            assert!(
+                registry.get(&ToolName((*name).into())).is_some(),
+                "expected builtin runtime tool '{}' to be registered",
+                name
+            );
+        }
+        assert_eq!(registry.list().len(), expected.len());
     }
 }

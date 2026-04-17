@@ -1,5 +1,6 @@
 mod composer;
 mod layout;
+mod markdown;
 mod theme;
 mod transcript;
 

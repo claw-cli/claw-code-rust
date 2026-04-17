@@ -9,7 +9,7 @@ impl TuiApp {
             cwd: config.cwd.clone(),
             server_env: config.server_env,
             server_log_level: config.server_log_level,
-            thinking_selection: None,
+            thinking_selection: config.thinking_selection.clone(),
         });
 
         let mut app = Self {
@@ -32,7 +32,7 @@ impl TuiApp {
             pending_assistant_index: None,
             pending_reasoning_index: None,
             pending_tool_items: std::collections::HashMap::new(),
-            thinking_selection: None,
+            thinking_selection: config.thinking_selection,
             worker,
             model_catalog: config.model_catalog,
             saved_models: config.saved_models,
@@ -58,6 +58,15 @@ impl TuiApp {
             inline_assistant_header_emitted: false,
             pending_inline_history: Vec::new(),
         };
+
+        if let Err(error) = app.validate_model_provider_selection(app.provider, &app.model) {
+            app.push_item(
+                TranscriptItemKind::Error,
+                "Model configuration error",
+                error.to_string(),
+            );
+            app.status_message = "Configured model does not match the active provider".to_string();
+        }
 
         if app.show_model_onboarding {
             app.show_onboarding_model_panel();

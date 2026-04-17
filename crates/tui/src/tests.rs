@@ -532,6 +532,63 @@ async fn slash_model_with_argument_in_inline_mode_updates_status_without_transcr
 }
 
 #[tokio::test]
+async fn slash_model_rejects_builtin_model_that_does_not_match_active_provider() {
+    let mut app = test_app();
+    app.model_catalog = PresetModelCatalog::new(vec![Model {
+        slug: "gpt-5.4".to_string(),
+        display_name: "GPT-5.4".to_string(),
+        provider: ProviderFamily::openai(),
+        ..Model::default()
+    }]);
+
+    app.handle_slash_command("/model gpt-5.4".to_string())
+        .expect("model command should stay in tui");
+
+    assert_eq!(app.model, "test-model");
+    assert_eq!(app.status_message, "Failed to switch model");
+    assert_eq!(
+        app.transcript.last(),
+        Some(&TranscriptItem::new(
+            TranscriptItemKind::Error,
+            "Model switch failed",
+            "model `gpt-5.4` requires provider `openai`, but the active wire_api resolves to `anthropic`"
+        ))
+    );
+}
+
+#[tokio::test]
+async fn slash_model_rejects_saved_model_with_mismatched_wire_api() {
+    let mut app = test_app();
+    app.model_catalog = PresetModelCatalog::new(vec![Model {
+        slug: "gpt-5.4".to_string(),
+        display_name: "GPT-5.4".to_string(),
+        provider: ProviderFamily::openai(),
+        ..Model::default()
+    }]);
+    app.saved_models = vec![SavedModelEntry {
+        model: "gpt-5.4".to_string(),
+        provider: ProviderFamily::anthropic(),
+        wire_api: clawcr_core::ProviderWireApi::AnthropicMessages,
+        base_url: None,
+        api_key: None,
+    }];
+
+    app.handle_slash_command("/model gpt-5.4".to_string())
+        .expect("model command should stay in tui");
+
+    assert_eq!(app.model, "test-model");
+    assert_eq!(app.status_message, "Failed to switch model");
+    assert_eq!(
+        app.transcript.last(),
+        Some(&TranscriptItem::new(
+            TranscriptItemKind::Error,
+            "Model switch failed",
+            "model `gpt-5.4` requires provider `openai`, but the active wire_api resolves to `anthropic`"
+        ))
+    );
+}
+
+#[tokio::test]
 async fn inline_slash_popup_uses_reserved_bottom_area_and_restores_transcript() {
     let mut app = test_app();
     app.inline_mode = true;
@@ -697,6 +754,7 @@ async fn onboarding_model_picker_enter_on_builtin_row_prompts_for_connection() {
     app.saved_models = vec![SavedModelEntry {
         model: "existing-model".to_string(),
         provider: ProviderFamily::anthropic(),
+        wire_api: clawcr_core::ProviderWireApi::AnthropicMessages,
         base_url: Some("https://example.invalid/v1".to_string()),
         api_key: Some("secret".to_string()),
     }];
