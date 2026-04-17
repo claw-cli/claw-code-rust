@@ -2,80 +2,43 @@
 
 ## Iteration 1: 2026-04-17
 
-### US-035 (Issue #35) ✅ 完成 - 非交互式 prompt 模式
-- **PR**: #37 → **已合并**到上游 main (commit 64eb42c)
-- **Files**: `crates/cli/src/main.rs`, `crates/cli/src/agent.rs`, `crates/provider/src/openai/chat_completions.rs`
-- **Features**:
-  - `clawcr prompt <text>` - 非交互式子命令（发送消息、打印响应、退出）
-  - `clawcr --model <name>` - 全局 CLI 参数覆盖默认模型
-  - `clawcr doctor` - 诊断命令（检查工具链、配置、provider、catalog）
-  - `CLAWCR_REQUEST_TIMEOUT` 环境变量设置 HTTP 超时（默认 300s）
-- **Status**: ✅ 完成
+### US-035 ✅ 完成 - 非交互式 prompt 模式
+- PR #37 → 已合并 (64eb42c)
+- Files: crates/cli/src/main.rs, crates/cli/src/agent.rs
+- Features: `clawcr prompt <text>`、--model 全局参数、doctor 诊断命令、CLAWCR_REQUEST_TIMEOUT 环境变量
 
-### US-036 (Issue #36) ✅ 关闭 - CJK 文本流式 panic
-- **Issue**: #36 - 流式响应中 CJK 文本导致 panic
-- **Root cause**: `earliest_partial_start()` 使用字节索引而非 char_indices()
-- **Status**: 上游已有相同修复 - 不用再 PR
+### US-036 ✅ 关闭 - CJK 文本流式 panic
+- upstream 已有相同修复，无需 PR
 
-### Streaming Fix 本地暂存 - read_timeout 改进
-- **Files**: `crates/provider/src/openai/chat_completions.rs`, `stream.rs`
-- **Changes**:
-  - `.timeout()` → `.read_timeout()`（每次数据块后重置）
-  - 改进 timeout/decoding 错误信息
-- **Testing**: 短 prompt 5/5 通过，长 prompt 偶发失败
-- **Root cause**: NVIDIA NIM API 不稳定 + reqwest_eventsource 兼容性问题
-- **Status**: 未提交 - 需要更多测试后再提交/PR
+### Streaming Fix ⏳ 本地 - read_timeout 改进
+- Files: crates/provider/src/openai/chat_completions.rs, stream.rs
+- .timeout() → .read_timeout()，改进错误信息
+- 短 prompt 5/5 通过，长 prompt 偶发失败
 
 ### AGENTS.md 配置 ✅ 完成
-- 建立自主 Agent 模式
-- 拆分为：AGENTS.md（宪法）+ `docs/agent-rules/`（详细规则）
-- **AGENTS.md**（730字符）：社交边界、启动协议、通知消费、提交纪律、文件意识
-- **docs/agent-rules/git-workflow.md**：分支策略、上游协作
-- **docs/agent-rules/rust-conventions.md**：Rust 编码和测试标准
-- **docs/agent-rules/cli-operations.md**：PowerShell 坑点、通知系统、调试方法
-- **新工作流**：给上游提 PR 用 feature 分支（`fork/feat/xxx`），`fork/main` 留给自己维护
+- 拆分为：AGENTS.md（宪法）+ docs/agent-rules/（详细规则）
+- git-workflow.md、rust-conventions.md、cli-operations.md
 
 ### US-NOTIFY ✅ 完成 - GitHub 活动通知系统
-- **Design**: `docs/plans/2026-04-18-github-notification-design.md`
-- **Files**:
-  - `.github/workflows/github-notifications.yml` - Actions 工作流（30分钟 cron）
-  - `notifications/github-meta.json` - 元数据（时间戳、未读数）
-  - `notifications/github-activity.jsonl` - 事件日志（JSON Lines 格式）
-- **Features**:
-  - 自动采集：上游 commits、PR 活动、issue 更新、评论
-  - 上游使用公开 GitHub API（公开仓库无需认证）
-  - Agent 在会话启动时 + 长会话中按需读取
-  - 30天自动清理旧记录
-- **Testing**: 成功从上游历史采集 100 个事件
-- **Status**: 运行中 - 每 30 分钟在 fork 上执行
+- .github/workflows/github-notifications.yml（30分钟 cron）
+- notifications/github-meta.json、github-activity.jsonl
+- Agent 会话启动时 + 长会话中按需读取
 
 ## 验证状态
-- `cargo build --release`: 通过
-- `clawcr prompt "hi"`: 通过（短 prompt）
-
-## 已验证可用的现有功能
-- 交互式 TUI 模式
-- 服务器模式（`clawcr server`）
-- 引导向导（`clawcr onboard`）
-- NVIDIA NIM provider 支持（`stepfun-ai/step-3.5-flash`）
+- cargo build --release: ✅
+- clawcr prompt "hi": ✅
 
 ## 已知问题
-- 复杂 prompt 有时失败 `error decoding response body` - 可能是 NVIDIA NIM API 不稳定
-- 其他 NVIDIA NIM 模型不可用（404 错误）
-- 上下文压缩需要 LLM-based 压缩（见 query.rs TODO）
+- 复杂 prompt 有时 `error decoding response body`（NVIDIA NIM API 不稳定）
+- 其他 NVIDIA NIM 模型 404
 
-## 上游动态（来自通知系统）
-- **64eb42c**: 合并 PR #37 (feat: prompt, --model, doctor) ← **我们的 PR！**
-- **ee84dad**: feat: add prompt subcommand, --model flag, doctor command
-- **3200938**: 合并 PR #34 (fix config BUG + markdown TUI)
-- 上游 main: `64eb42c`
+## 上游动态
+- 64eb42c: 合并 PR #37 ← 我们的 PR！
 
 ## Git 状态
-- **Branch**: `main`（领先 origin/main，落后 upstream/main）
-- **Upstream main**: `64eb42c`（包含我们的 PR #37）
-- **Remote**: `origin` → bigmanBass666/claw-code-rust, `upstream` → 7df-lab/claw-code-rust
+- upstream/main: 64eb42c（包含 PR #37）
+- origin/main: 落后于 upstream
 
-## 分支工作流（重要）
-- `fork/main`：自己的维护分支（随便改，不用管上游）
-- `fork/feat/xxx`：只给上游提 PR 用（干净、最小 diff）
-- **Rule**: 不要把 fork 维护的 commit 和给上游 PR 的 commit 混在一起
+## 分支工作流
+- fork/main: 自己维护，随便改
+- fork/feat/xxx: 给上游提 PR 用
