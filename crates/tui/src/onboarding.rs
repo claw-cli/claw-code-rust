@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clawcr_core::{provider_id_for_endpoint, provider_name_for_endpoint};
+use clawcr_core::{ProviderWireApi, provider_id_for_endpoint, provider_name_for_endpoint};
 use clawcr_protocol::ProviderFamily;
 use clawcr_utils::find_clawcr_home;
 use toml::Value;
@@ -38,7 +38,11 @@ pub(crate) fn save_onboarding_config(
     Ok(())
 }
 
-pub(crate) fn save_last_used_model(provider: ProviderFamily, model: &str) -> Result<()> {
+pub(crate) fn save_last_used_model(
+    wire_api: Option<ProviderWireApi>,
+    provider: ProviderFamily,
+    model: &str,
+) -> Result<()> {
     let path = find_clawcr_home()
         .context("could not determine user config path")?
         .join("config.toml");
@@ -50,7 +54,7 @@ pub(crate) fn save_last_used_model(provider: ProviderFamily, model: &str) -> Res
     } else {
         Value::Table(Default::default())
     };
-    root = merge_last_used_model(root, provider, model)?;
+    root = merge_last_used_model(root, wire_api, provider, model)?;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -62,6 +66,49 @@ pub(crate) fn save_last_used_model(provider: ProviderFamily, model: &str) -> Res
         .with_context(|| format!("failed to write {}", path.display()))?;
 
     Ok(())
+}
+
+pub(crate) fn save_thinking_selection(selection: Option<&str>) -> Result<()> {
+    let path = find_clawcr_home()
+        .context("could not determine user config path")?
+        .join("config.toml");
+    let mut root = if path.exists() {
+        let data = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        data.parse::<Value>()
+            .with_context(|| format!("failed to parse {}", path.display()))?
+    } else {
+        Value::Table(Default::default())
+    };
+    root = merge_thinking_selection(root, selection)?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let rendered = toml::to_string_pretty(&root)?;
+
+    std::fs::write(&path, rendered)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn merge_thinking_selection(mut root: Value, selection: Option<&str>) -> Result<Value> {
+    let table = root
+        .as_table_mut()
+        .context("config root must be a TOML table")?;
+    match normalized_optional(selection) {
+        Some(value) => {
+            table.insert(
+                "model_thinking_selection".to_string(),
+                Value::String(value.to_string()),
+            );
+        }
+        None => {
+            table.remove("model_thinking_selection");
+        }
+    }
+    Ok(root)
 }
 
 fn merge_onboarding_config(
@@ -145,11 +192,16 @@ fn merge_onboarding_config(
     Ok(root)
 }
 
-fn merge_last_used_model(mut root: Value, provider: ProviderFamily, model: &str) -> Result<Value> {
+fn merge_last_used_model(
+    mut root: Value,
+    wire_api: Option<ProviderWireApi>,
+    provider: ProviderFamily,
+    model: &str,
+) -> Result<Value> {
     let table = root
         .as_table_mut()
         .context("config root must be a TOML table")?;
-    let provider_id = current_provider_id(table, &provider);
+    let provider_id = current_provider_id(table, &provider, model);
     table.insert(
         "model_provider".to_string(),
         Value::String(provider_id.clone()),
@@ -168,21 +220,58 @@ fn merge_last_used_model(mut root: Value, provider: ProviderFamily, model: &str)
     let profile_table = profile
         .as_table_mut()
         .context("provider config must be a TOML table")?;
-    profile_table.insert(
-        "wire_api".to_string(),
-        Value::String(match provider {
-            ProviderFamily::Anthropic { .. } => "anthropic_messages".to_string(),
-            ProviderFamily::Openai { .. } => "openai_chat_completions".to_string(),
-        }),
-    );
+    if let Some(wire_api) = wire_api.or_else(|| {
+        profile_table
+            .get("wire_api")
+            .and_then(Value::as_str)
+            .and_then(provider_wire_api_from_str)
+    }) {
+        profile_table.insert(
+            "wire_api".to_string(),
+            Value::String(wire_api_to_string(wire_api).to_string()),
+        );
+    }
     Ok(root)
 }
 
-fn current_provider_id(table: &toml::map::Map<String, Value>, provider: &ProviderFamily) -> String {
+fn current_provider_id(
+    table: &toml::map::Map<String, Value>,
+    provider: &ProviderFamily,
+    model: &str,
+) -> String {
     table
-        .get("model_provider")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
+        .get("model_providers")
+        .and_then(Value::as_table)
+        .and_then(|providers| {
+            providers.iter().find_map(|(provider_id, value)| {
+                let profile = value.as_table()?;
+                let contains_model =
+                    profile
+                        .get("models")
+                        .and_then(Value::as_array)
+                        .is_some_and(|models| {
+                            models.iter().any(|entry| {
+                                entry
+                                    .as_table()
+                                    .and_then(|model_entry| model_entry.get("model"))
+                                    .and_then(Value::as_str)
+                                    == Some(model)
+                            })
+                        });
+                let matches_last_model =
+                    profile.get("last_model").and_then(Value::as_str) == Some(model);
+                let matches_default_model =
+                    profile.get("default_model").and_then(Value::as_str) == Some(model);
+                (contains_model || matches_last_model || matches_default_model)
+                    .then(|| provider_id.clone())
+            })
+        })
+        .or_else(|| {
+            table
+                .get("model_provider")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
         .or_else(|| {
             table
                 .get("model_providers")
@@ -214,6 +303,27 @@ fn normalized_optional(value: Option<&str>) -> Option<&str> {
             Some(trimmed)
         }
     })
+}
+
+fn provider_wire_api_from_str(value: &str) -> Option<ProviderWireApi> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "chat_completion"
+        | "chat_completions"
+        | "openai"
+        | "openai_chat_completion"
+        | "openai_chat_completions" => Some(ProviderWireApi::OpenAIChatCompletions),
+        "responses" | "openai_responses" => Some(ProviderWireApi::OpenAIResponses),
+        "anthropic" | "messages" | "anthropic_messages" => Some(ProviderWireApi::AnthropicMessages),
+        _ => None,
+    }
+}
+
+fn wire_api_to_string(wire_api: ProviderWireApi) -> &'static str {
+    match wire_api {
+        ProviderWireApi::OpenAIChatCompletions => "openai_chat_completions",
+        ProviderWireApi::OpenAIResponses => "openai_responses",
+        ProviderWireApi::AnthropicMessages => "anthropic_messages",
+    }
 }
 
 fn upsert_model_entry(
@@ -373,6 +483,95 @@ mod tests {
         assert_eq!(
             entry.get("api_key").and_then(Value::as_str),
             Some("new-secret")
+        );
+    }
+
+    #[test]
+    fn merge_last_used_model_prefers_profile_that_contains_model() {
+        let root: Value = r#"
+model_provider = "anthropic"
+
+[model_providers.anthropic]
+wire_api = "anthropic_messages"
+
+[[model_providers.anthropic.models]]
+model = "claude-sonnet-4"
+
+[model_providers.openai]
+wire_api = "openai_chat_completions"
+
+[[model_providers.openai.models]]
+model = "gpt-5.4"
+"#
+        .parse()
+        .expect("parse");
+
+        let merged = merge_last_used_model(root, None, ProviderFamily::anthropic(), "gpt-5.4")
+            .expect("merge");
+
+        let table = merged.as_table().expect("table");
+        assert_eq!(
+            table.get("model_provider").and_then(Value::as_str),
+            Some("openai")
+        );
+        assert_eq!(
+            table
+                .get("model_providers")
+                .and_then(Value::as_table)
+                .and_then(|providers| providers.get("openai"))
+                .and_then(Value::as_table)
+                .and_then(|profile| profile.get("wire_api"))
+                .and_then(Value::as_str),
+            Some("openai_chat_completions")
+        );
+    }
+
+    #[test]
+    fn merge_last_used_model_preserves_existing_wire_api_when_not_provided() {
+        let root: Value = r#"
+[model_providers.openai]
+wire_api = "openai_responses"
+
+[[model_providers.openai.models]]
+model = "gpt-5.4"
+"#
+        .parse()
+        .expect("parse");
+
+        let merged =
+            merge_last_used_model(root, None, ProviderFamily::openai(), "gpt-5.4").expect("merge");
+
+        assert_eq!(
+            merged
+                .as_table()
+                .and_then(|table| table.get("model_providers"))
+                .and_then(Value::as_table)
+                .and_then(|providers| providers.get("openai"))
+                .and_then(Value::as_table)
+                .and_then(|profile| profile.get("wire_api"))
+                .and_then(Value::as_str),
+            Some("openai_responses")
+        );
+    }
+
+    #[test]
+    fn merge_thinking_selection_updates_and_removes_value() {
+        let merged = merge_thinking_selection(Value::Table(Default::default()), Some("medium"))
+            .expect("merge");
+        assert_eq!(
+            merged
+                .as_table()
+                .and_then(|table| table.get("model_thinking_selection"))
+                .and_then(Value::as_str),
+            Some("medium")
+        );
+
+        let removed = merge_thinking_selection(merged, None).expect("remove");
+        assert_eq!(
+            removed
+                .as_table()
+                .and_then(|table| table.get("model_thinking_selection")),
+            None
         );
     }
 }

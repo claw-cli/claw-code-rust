@@ -1,7 +1,8 @@
 use super::*;
 use crate::events::ThinkingListEntry;
-use crate::onboarding::save_last_used_model;
+use crate::onboarding::{save_last_used_model, save_thinking_selection};
 use clawcr_core::{ModelCatalog, SessionId};
+use clawcr_protocol::ProviderFamily;
 use clawcr_utils::find_clawcr_home;
 use std::io::{BufRead, BufReader};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -216,27 +217,53 @@ impl TuiApp {
     }
 
     pub(crate) fn set_model(&mut self, model: String) -> Result<()> {
+        self.validate_model_provider_selection(self.provider, &model)?;
         self.worker.set_model(model.clone())?;
-        save_last_used_model(self.provider, &model)?;
+        save_last_used_model(None, self.provider, &model)?;
         self.model = model;
         Ok(())
     }
 
     pub(crate) fn reconfigure_saved_model(
         &mut self,
+        wire_api: clawcr_core::ProviderWireApi,
         model: String,
         base_url: Option<String>,
         api_key: Option<String>,
     ) -> Result<()> {
+        let provider = wire_api.provider_family();
+        self.validate_model_provider_selection(provider, &model)?;
         if base_url.is_none() && api_key.is_none() {
-            self.set_model(model)
+            self.worker.set_model(model.clone())?;
+            save_last_used_model(Some(wire_api), provider, &model)?;
+            self.provider = provider;
+            self.model = model;
+            Ok(())
         } else {
             self.worker
-                .reconfigure_provider(model.clone(), base_url, api_key)?;
-            save_last_used_model(self.provider, &model)?;
+                .reconfigure_provider(wire_api, model.clone(), base_url, api_key)?;
+            save_last_used_model(Some(wire_api), provider, &model)?;
+            self.provider = provider;
             self.model = model;
             Ok(())
         }
+    }
+
+    pub(crate) fn validate_model_provider_selection(
+        &self,
+        provider: ProviderFamily,
+        model: &str,
+    ) -> Result<()> {
+        if let Some(catalog_model) = self.model_catalog.get(model)
+            && catalog_model.provider_family() != provider
+        {
+            anyhow::bail!(
+                "model `{model}` requires provider `{}`, but the active wire_api resolves to `{}`",
+                catalog_model.provider_family(),
+                provider
+            );
+        }
+        Ok(())
     }
 
     pub(crate) fn saved_model_entry(&self, model: &str) -> Option<&SavedModelEntry> {
@@ -409,9 +436,30 @@ impl TuiApp {
                     .find(|entry| entry.model == argument)
                     .cloned()
                 {
-                    self.reconfigure_saved_model(model.model, model.base_url, model.api_key)?;
+                    if let Err(error) = self.reconfigure_saved_model(
+                        model.wire_api,
+                        model.model,
+                        model.base_url,
+                        model.api_key,
+                    ) {
+                        self.push_item(
+                            TranscriptItemKind::Error,
+                            "Model switch failed",
+                            error.to_string(),
+                        );
+                        self.status_message = "Failed to switch model".to_string();
+                        return Ok(());
+                    }
                 } else {
-                    self.set_model(argument.to_string())?;
+                    if let Err(error) = self.set_model(argument.to_string()) {
+                        self.push_item(
+                            TranscriptItemKind::Error,
+                            "Model switch failed",
+                            error.to_string(),
+                        );
+                        self.status_message = "Failed to switch model".to_string();
+                        return Ok(());
+                    }
                 }
                 self.aux_panel = None;
                 self.aux_panel_selection = 0;
@@ -669,6 +717,7 @@ impl TuiApp {
                 self.onboarding_selected_api_key = None;
                 self.onboarding_prompt = None;
                 if let Err(error) = self.reconfigure_saved_model(
+                    saved_model.wire_api,
                     saved_model.model.clone(),
                     saved_model.base_url.clone(),
                     saved_model.api_key.clone(),
@@ -697,6 +746,15 @@ impl TuiApp {
                         error.to_string(),
                     );
                     self.status_message = "Failed to update thinking mode".to_string();
+                } else if let Err(error) =
+                    save_thinking_selection(self.thinking_selection.as_deref())
+                {
+                    self.push_item(
+                        TranscriptItemKind::Error,
+                        "Thinking update failed",
+                        error.to_string(),
+                    );
+                    self.status_message = "Failed to persist thinking mode".to_string();
                 } else {
                     self.status_message = format!("Thinking set to {}", selected.label);
                 }
@@ -737,17 +795,16 @@ impl TuiApp {
         };
         let base_url = self.onboarding_selected_base_url.take();
         let api_key = self.onboarding_selected_api_key.take();
+        let provider = self.onboarding_provider_for_model(&model);
+        let wire_api = clawcr_core::ProviderWireApi::default_for_provider(&provider);
+        self.validate_model_provider_selection(provider, &model)?;
 
         // Persist the choice first, then reconfigure the worker so the live session
         // immediately reflects the onboarding selection.
-        save_onboarding_config(
-            self.provider,
-            &model,
-            base_url.as_deref(),
-            api_key.as_deref(),
-        )?;
+        save_onboarding_config(provider, &model, base_url.as_deref(), api_key.as_deref())?;
         self.worker
-            .reconfigure_provider(model.clone(), base_url, api_key)?;
+            .reconfigure_provider(wire_api, model.clone(), base_url, api_key)?;
+        self.provider = provider;
         self.model = model.clone();
         self.aux_panel = None;
         self.aux_panel_selection = 0;

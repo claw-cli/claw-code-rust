@@ -166,6 +166,8 @@ pub struct InteractiveTuiConfig {
     pub model_catalog: PresetModelCatalog,
     /// Persisted model entries available for switching in the composer popup.
     pub saved_models: Vec<SavedModelEntry>,
+    /// Initial thinking selection restored from persisted config.
+    pub thinking_selection: Option<String>,
     /// Whether to open the model picker on startup.
     pub show_model_onboarding: bool,
     /// Terminal screen strategy used when launching the UI.

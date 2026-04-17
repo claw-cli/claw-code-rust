@@ -1,8 +1,10 @@
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
 };
+use std::path::Path;
+
 use textwrap::Options;
 
 use crate::{
@@ -10,22 +12,45 @@ use crate::{
     events::{TranscriptItem, TranscriptItemKind},
 };
 
-use super::theme;
+use super::{markdown, theme};
 
 pub(super) fn render(app: &TuiApp, area_width: u16, area_height: u16) -> Paragraph<'static> {
     let content = transcript_text(app, area_width.max(1));
-    let max_scroll = content.lines.len().saturating_sub(area_height as usize) as u16;
+    let max_scroll = rendered_line_count(content.clone(), area_width)
+        .saturating_sub(area_height as usize) as u16;
+    let paragraph = Paragraph::new(content).wrap(Wrap { trim: false });
     let scroll = if app.follow_output {
         max_scroll
     } else {
         app.scroll.min(max_scroll)
     };
 
-    Paragraph::new(content).scroll((scroll, 0))
+    paragraph.scroll((scroll, 0))
 }
 
 pub(super) fn line_count(app: &TuiApp, inner_width: u16) -> u16 {
-    transcript_text(app, inner_width.max(1)).lines.len() as u16
+    rendered_line_count(transcript_text(app, inner_width.max(1)), inner_width.max(1)) as u16
+}
+
+fn rendered_line_count(text: Text<'static>, width: u16) -> usize {
+    let width = usize::from(width.max(1));
+    text.lines
+        .iter()
+        .map(|line| {
+            let rendered = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            if rendered.is_empty() {
+                1
+            } else {
+                textwrap::wrap(&rendered, Options::new(width).break_words(false))
+                    .len()
+                    .max(1)
+            }
+        })
+        .sum()
 }
 
 fn transcript_text(app: &TuiApp, inner_width: u16) -> Text<'static> {
@@ -50,7 +75,7 @@ fn transcript_text(app: &TuiApp, inner_width: u16) -> Text<'static> {
         {
             lines.push(Line::from(""));
         }
-        append_transcript_item(&mut lines, item, app.spinner_index, inner_width);
+        append_transcript_item(&mut lines, item, app.spinner_index, inner_width, &app.cwd);
         previous_kind = Some(item.kind);
     }
     Text::from(lines)
@@ -61,13 +86,14 @@ fn append_transcript_item(
     item: &TranscriptItem,
     spinner_index: usize,
     inner_width: u16,
+    cwd: &Path,
 ) {
     match item.kind {
         TranscriptItemKind::User => {
             append_plain_message(lines, item, "> ", "  ", inner_width);
         }
         TranscriptItemKind::Assistant => {
-            append_plain_message(lines, item, "• ", "  ", inner_width);
+            append_markdown_message(lines, item, cwd);
         }
         TranscriptItemKind::Reasoning => {
             append_wrapped_title(lines, &item.title, item.kind, inner_width);
@@ -108,6 +134,27 @@ fn append_transcript_item(
                 append_transcript_body(lines, item, inner_width);
             }
         }
+    }
+}
+
+fn append_markdown_message(lines: &mut Vec<Line<'static>>, item: &TranscriptItem, cwd: &Path) {
+    let prefix_style = theme::transcript_prefix(TranscriptItemKind::Assistant);
+    let rendered = markdown::render_markdown_lines(
+        item.body.trim_end_matches('\n'),
+        theme::transcript_body(item.kind),
+        Some(cwd),
+    );
+
+    if rendered.is_empty() {
+        lines.push(Line::from(vec![Span::styled("• ", prefix_style)]));
+        return;
+    }
+
+    for (index, line) in rendered.into_iter().enumerate() {
+        let prefix = if index == 0 { "• " } else { "  " };
+        let mut spans = vec![Span::styled(prefix, prefix_style)];
+        spans.extend(line.spans);
+        lines.push(Line::from(spans).style(line.style));
     }
 }
 

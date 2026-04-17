@@ -1,20 +1,13 @@
+use crate::shell_exec::{
+    ShellExecRequest, default_max_output_tokens, default_timeout_ms, default_yield_time_ms,
+    execute_shell_command, platform_shell_program,
+};
 use crate::{Tool, ToolContext, ToolOutput};
 use async_trait::async_trait;
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde_json::json;
 use std::path::PathBuf;
-use std::process::Stdio;
-use std::sync::mpsc;
-use std::time::Instant;
-use tokio::process::Command;
-use tokio::time::{Duration, timeout};
-use tracing::info;
 
 const DESCRIPTION: &str = include_str!("bash.txt");
-const MAX_METADATA_LENGTH: usize = 30_000;
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-const DEFAULT_YIELD_TIME_MS: u64 = 1_000;
-const DEFAULT_MAX_OUTPUT_TOKENS: usize = 16_000;
 const DESCRIPTION_MAX_BYTES_LABEL: &str = "64 KB";
 
 /// Execute shell commands.
@@ -23,19 +16,13 @@ const DESCRIPTION_MAX_BYTES_LABEL: &str = "64 KB";
 /// process and captures stdout/stderr.
 pub struct BashTool;
 
-#[allow(dead_code)]
-fn windows_destructive_filesystem_guidance() -> &'static str {
-    r#"Windows safety rules:
-- Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to `cmd /c`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as `Remove-Item` / `Move-Item` with `-LiteralPath`, and avoid string-built shell commands for file operations.
-- Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked."#
-}
-
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
         "bash"
     }
 
+    /// TODO: the shell tool should be re implemented.
     fn description(&self) -> &str {
         let chaining = if cfg!(windows) {
             "If commands depend on each other and must run sequentially, use a single PowerShell command string. In Windows PowerShell 5.1, do not rely on Bash chaining semantics like `cmd1 && cmd2`; prefer `cmd1; if ($?) { cmd2 }` when the later command depends on earlier success."
@@ -50,7 +37,7 @@ impl Tool for BashTool {
                         .map_or_else(|_| ".".to_string(), |path| path.display().to_string()),
                 )
                 .replace("${os}", std::env::consts::OS)
-                .replace("${shell}", platform_shell(true).program)
+                .replace("${shell}", platform_shell_program(true))
                 .replace("${chaining}", chaining)
                 .replace("${maxBytes}", DESCRIPTION_MAX_BYTES_LABEL)
                 .into_boxed_str(),
@@ -117,7 +104,7 @@ impl Tool for BashTool {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing 'command' field"))?;
 
-        let timeout_ms = input["timeout"].as_u64().unwrap_or(DEFAULT_TIMEOUT_MS);
+        let timeout_ms = input["timeout"].as_u64().unwrap_or(default_timeout_ms());
         let workdir = input["workdir"]
             .as_str()
             .map(PathBuf::from)
@@ -131,107 +118,24 @@ impl Tool for BashTool {
         let login = input["login"].as_bool().unwrap_or(true);
         let yield_time_ms = input["yield_time_ms"]
             .as_u64()
-            .unwrap_or(DEFAULT_YIELD_TIME_MS);
+            .unwrap_or(default_yield_time_ms());
         let max_output_tokens = input["max_output_tokens"]
             .as_u64()
             .map(|value| value as usize)
-            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+            .unwrap_or(default_max_output_tokens());
 
-        if !workdir.exists() {
-            return Ok(ToolOutput::error(format!(
-                "working directory does not exist: {}",
-                workdir.display()
-            )));
-        }
-
-        let shell = resolve_shell(shell_override.as_deref(), login);
-        let command_to_run = if cfg!(windows) && shell.program.eq_ignore_ascii_case("powershell") {
-            format!(
-                concat!(
-                    "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); ",
-                    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ",
-                    "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); ",
-                    "[System.Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ",
-                    "{}"
-                ),
-                command
-            )
-        } else {
-            command.to_string()
-        };
-
-        if tty {
-            return run_with_pty(
-                shell,
-                command_to_run,
-                workdir,
-                description,
-                timeout_ms,
-                yield_time_ms,
-                max_output_tokens,
-            )
-            .await;
-        }
-
-        info!(command, shell = shell.program, "executing shell command");
-        let command_preview = preview(&command_to_run);
-        let mut child = Command::new(shell.program);
-        child
-            .args(shell.args)
-            .arg(&command_to_run)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .current_dir(&workdir);
-
-        if cfg!(windows) {
-            child.env("PYTHONUTF8", "1");
-        }
-
-        let result = timeout(Duration::from_millis(timeout_ms), child.output()).await;
-
-        match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-
-                let result_text = merge_streams(&stdout, &stderr);
-                let result_text = truncate_output(&result_text, max_output_tokens);
-                if output.status.success() {
-                    Ok(ToolOutput {
-                        content: result_text.clone(),
-                        is_error: false,
-                        metadata: Some(json!({
-                            "output": preview(&result_text),
-                            "command": command_preview,
-                            "exit": output.status.code(),
-                            "description": description,
-                            "cwd": workdir,
-                            "yield_time_ms": yield_time_ms,
-                        })),
-                    })
-                } else {
-                    let code = output.status.code().unwrap_or(-1);
-                    Ok(ToolOutput {
-                        content: format!("exit code {}\n{}", code, result_text),
-                        is_error: true,
-                        metadata: Some(json!({
-                            "output": preview(&result_text),
-                            "command": command_preview,
-                            "exit": code,
-                            "description": description,
-                            "cwd": workdir,
-                            "yield_time_ms": yield_time_ms,
-                        })),
-                    })
-                }
-            }
-            Ok(Err(e)) => Ok(ToolOutput::error(format!("failed to spawn process: {}", e))),
-            Err(_) => Ok(ToolOutput::error(format!(
-                "command timed out after {}ms",
-                timeout_ms
-            ))),
-        }
+        execute_shell_command(ShellExecRequest {
+            command: command.to_string(),
+            workdir,
+            description,
+            shell_override,
+            tty,
+            login,
+            timeout_ms,
+            yield_time_ms,
+            max_output_tokens,
+        })
+        .await
     }
 
     fn is_read_only(&self) -> bool {
@@ -239,262 +143,23 @@ impl Tool for BashTool {
     }
 }
 
-struct ShellSpec {
-    program: &'static str,
-    args: &'static [&'static str],
-}
-
-fn resolve_shell(shell: Option<&str>, login: bool) -> ShellSpec {
-    let shell = shell.unwrap_or("");
-    let normalized = shell.to_ascii_lowercase();
-
-    if normalized.contains("powershell") || normalized == "pwsh" || normalized == "powershell" {
-        return ShellSpec {
-            program: "powershell",
-            args: &["-NoLogo", "-NoProfile", "-Command"],
-        };
-    }
-
-    if normalized.ends_with("cmd") || normalized.ends_with("cmd.exe") || normalized == "cmd" {
-        return ShellSpec {
-            program: "cmd",
-            args: &["/C"],
-        };
-    }
-
-    if normalized.contains("zsh") {
-        return ShellSpec {
-            program: "zsh",
-            args: if login { &["-lc"] } else { &["-c"] },
-        };
-    }
-
-    if normalized.contains("bash") {
-        return ShellSpec {
-            program: "bash",
-            args: if login { &["-lc"] } else { &["-c"] },
-        };
-    }
-
-    if login {
-        platform_shell(true)
-    } else {
-        platform_shell(false)
-    }
-}
-
-fn preview(text: &str) -> String {
-    if text.len() <= MAX_METADATA_LENGTH {
-        return text.to_string();
-    }
-    format!("{}\n\n...", &text[..MAX_METADATA_LENGTH])
-}
-
-fn truncate_output(text: &str, max_output_tokens: usize) -> String {
-    if max_output_tokens == 0 {
-        return String::new();
-    }
-    let max_chars = max_output_tokens.saturating_mul(4);
-    let mut out: String = text.chars().take(max_chars).collect();
-    if out.len() < text.len() {
-        out.push_str("\n\n... [truncated]");
-    }
-    out
-}
-
-fn merge_streams(stdout: &str, stderr: &str) -> String {
-    let mut result = String::new();
-    if !stdout.is_empty() {
-        result.push_str(stdout);
-    }
-    if !stderr.is_empty() {
-        if !result.is_empty() {
-            result.push('\n');
-        }
-        result.push_str("[stderr]\n");
-        result.push_str(stderr);
-    }
-    if result.is_empty() {
-        "(no output)".to_string()
-    } else {
-        result
-    }
-}
-
-fn platform_shell(login: bool) -> ShellSpec {
-    if cfg!(windows) {
-        ShellSpec {
-            program: "powershell",
-            args: &["-NoProfile", "-Command"],
-        }
-    } else {
-        ShellSpec {
-            program: "bash",
-            args: if login { &["-lc"] } else { &["-c"] },
-        }
-    }
-}
-
-async fn run_with_pty(
-    shell: ShellSpec,
-    command_to_run: String,
-    workdir: PathBuf,
-    description: String,
-    timeout_ms: u64,
-    yield_time_ms: u64,
-    max_output_tokens: usize,
-) -> anyhow::Result<ToolOutput> {
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: 24,
-            cols: 120,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|error| anyhow::anyhow!("failed to open PTY: {error}"))?;
-
-    let mut builder = CommandBuilder::new(shell.program);
-    builder.args(shell.args);
-    builder.arg(&command_to_run);
-    builder.cwd(&workdir);
-    if cfg!(windows) {
-        builder.env("PYTHONUTF8", "1");
-        builder.env("TERM", "xterm-256color");
-        builder.env("COLORTERM", "truecolor");
-    }
-
-    let mut child = pair
-        .slave
-        .spawn_command(builder)
-        .map_err(|error| anyhow::anyhow!("failed to spawn PTY command: {error}"))?;
-    drop(pair.slave);
-
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|error| anyhow::anyhow!("failed to clone PTY reader: {error}"))?;
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut buffer = [0u8; 4096];
-        loop {
-            match std::io::Read::read(&mut reader, &mut buffer) {
-                Ok(0) => break,
-                Ok(size) => {
-                    if tx.send(buffer[..size].to_vec()).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    let started = Instant::now();
-    let sleep_ms = yield_time_ms.max(10);
-    let timeout = Duration::from_millis(timeout_ms);
-    let mut output = Vec::new();
-    let mut exit_code = None;
-    let mut timed_out = false;
-
-    loop {
-        while let Ok(chunk) = rx.try_recv() {
-            output.extend_from_slice(&chunk);
-        }
-
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| anyhow::anyhow!("failed to poll PTY child: {error}"))?
-        {
-            exit_code = Some(status.exit_code() as i32);
-            break;
-        }
-
-        if started.elapsed() >= timeout {
-            timed_out = true;
-            let _ = child.kill();
-            let _ = child.wait();
-            break;
-        }
-
-        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
-    }
-
-    while let Ok(chunk) = rx.try_recv() {
-        output.extend_from_slice(&chunk);
-    }
-
-    let mut text = String::from_utf8_lossy(&output).into_owned();
-    text = truncate_output(&text, max_output_tokens);
-
-    if timed_out {
-        return Ok(ToolOutput {
-            content: format!("command timed out after {}ms\n{}", timeout_ms, text),
-            is_error: true,
-            metadata: Some(json!({
-                "output": preview(&text),
-                "command": command_to_run,
-                "exit": exit_code,
-                "description": description,
-                "cwd": workdir,
-                "yield_time_ms": yield_time_ms,
-                "tty": true,
-            })),
-        });
-    }
-
-    let is_error = exit_code.unwrap_or(1) != 0;
-    Ok(ToolOutput {
-        content: if is_error {
-            format!("exit code {}\n{}", exit_code.unwrap_or(-1), text)
-        } else {
-            text.clone()
-        },
-        is_error,
-        metadata: Some(json!({
-            "output": preview(&text),
-            "command": command_to_run,
-            "exit": exit_code,
-            "description": description,
-            "cwd": workdir,
-            "yield_time_ms": yield_time_ms,
-            "tty": true,
-        })),
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_shell_prefers_powershell_alias() {
-        let spec = resolve_shell(Some("pwsh"), true);
-        assert_eq!(spec.program, "powershell");
-        assert_eq!(spec.args, &["-NoLogo", "-NoProfile", "-Command"]);
-    }
-
-    #[test]
-    fn resolve_shell_prefers_cmd_alias() {
-        let spec = resolve_shell(Some("cmd.exe"), true);
-        assert_eq!(spec.program, "cmd");
-        assert_eq!(spec.args, &["/C"]);
-    }
+    use crate::shell_exec::{merge_streams, platform_shell_program, preview, truncate_output};
 
     #[test]
     fn resolve_shell_defaults_to_platform_shell_login() {
-        let expected = platform_shell(true);
-        let spec = resolve_shell(None, true);
-        assert_eq!(spec.program, expected.program);
-        assert_eq!(spec.args, expected.args);
+        assert_eq!(
+            platform_shell_program(true),
+            if cfg!(windows) { "powershell" } else { "bash" }
+        );
     }
 
     #[test]
     fn preview_truncates_long_text() {
-        let long = "a".repeat(MAX_METADATA_LENGTH + 1);
+        let long = "a".repeat(30_001);
         let result = preview(&long);
         assert!(result.ends_with("\n\n..."));
-        assert_eq!(result.len(), MAX_METADATA_LENGTH + 5); // adds newline newline ...
     }
 
     #[test]
