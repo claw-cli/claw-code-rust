@@ -32,6 +32,24 @@
 - Added startup protocol: read progress.txt + check git log on fresh sessions
 - Added commit-after-every-change rule
 - Created progress.txt for lightweight status tracking
+- Translated AGENTS.md to Chinese
+- Added Social Boundary & Authority section (agent vs user responsibilities)
+- Added Technical Decision Authority principle
+
+### US-NOTIFY COMPLETED - GitHub Activity Notification System
+- **Design**: `docs/plans/2026-04-18-github-notification-design.md`
+- **Files**:
+  - `.github/workflows/github-notifications.yml` - Actions workflow (30min cron)
+  - `notifications/github-meta.json` - metadata (timestamps, unread count)
+  - `notifications/github-activity.jsonl` - event log (JSON Lines format)
+  - `AGENTS.md` - updated with notification reading protocol
+- **Features**:
+  - Auto-collects: upstream commits, PR activity, issue updates, comments
+  - Uses public GitHub API for upstream (no auth needed for public repos)
+  - Agent reads on session start + long-session mid-request check
+  - 30-day auto-cleanup of old entries
+- **Testing**: Successfully collected 100 events from upstream history
+- **Status**: LIVE - running every 30 minutes on fork
 
 ## Verification Status
 - `cargo build --release`: PASSED
