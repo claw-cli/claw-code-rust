@@ -4,40 +4,39 @@
 
 ### US-035 ✅ 完成 - 非交互式 prompt 模式
 - PR #37 → 已合并 (64eb42c)
-- Files: crates/cli/src/main.rs, crates/cli/src/agent.rs
-- Features: `clawcr prompt <text>`、--model 全局参数、doctor 诊断命令、CLAWCR_REQUEST_TIMEOUT 环境变量
+- Features: `clawcr prompt <text>`、--model 全局参数、doctor 诊断命令
 
 ### US-036 ✅ 关闭 - CJK 文本流式 panic
 - upstream 已有相同修复，无需 PR
 
-### Streaming Fix ⏳ 本地 - read_timeout 改进
-- Files: crates/provider/src/openai/chat_completions.rs, stream.rs
+### Streaming Fix ✅ 完成 - read_timeout + null 数组修复
 - .timeout() → .read_timeout()，改进错误信息
-- 短 prompt 5/5 通过，长 prompt 偶发失败
+- 修复 OpenAI 兼容 API 返回 null 数组（tool_calls/annotations/choices）的解析问题
+- NVIDIA NIM API (meta/llama-3.1-8b-instruct) 测试通过
 
 ### AGENTS.md 配置 ✅ 完成
 - 拆分为：AGENTS.md（宪法）+ docs/agent-rules/（详细规则）
 - git-workflow.md、rust-conventions.md、cli-operations.md
 
 ### US-NOTIFY ✅ 完成 - GitHub 活动通知系统
-- .github/workflows/github-notifications.yml（30分钟 cron）
+- .github/workflows/github-notifications.yml（15分钟 cron）
 - notifications/github-meta.json、github-activity.jsonl
 - Agent 会话启动时 + 长会话中按需读取
 
+### CI Fix ✅ 完成 - 测试 + 格式修复
+- 修复测试中 Cli 结构体缺少 model 字段
+- cargo fmt 格式化
+
 ## 验证状态
 - cargo build --release: ✅
-- clawcr prompt "hi": ✅
-
-## 已知问题
-- 复杂 prompt 有时 `error decoding response body`（NVIDIA NIM API 不稳定）
-- 其他 NVIDIA NIM 模型 404
+- cargo test --workspace: ✅ (全部通过)
+- clawcr doctor: ✅
+- clawcr prompt: ✅ (meta/llama-3.1-8b-instruct)
+- CI (GitHub Actions): ✅
+- 通知系统: ✅ (手动触发 + cron 均正常)
 
 ## 上游动态
 - 64eb42c: 合并 PR #37 ← 我们的 PR！
-
-## Git 状态
-- upstream/main: 64eb42c（包含 PR #37）
-- origin/main: 落后于 upstream
 
 ## 分支工作流
 - fork/main: 自己维护，随便改
