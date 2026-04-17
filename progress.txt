@@ -1,42 +1,58 @@
 # Progress
 
-## Last Updated: 2026-04-17
+## Iteration 1: 2026-04-17
 
-## Current Status
+### US-035 (Issue #35) COMPLETED - Non-interactive prompt mode
+- **PR**: #37
+- **Files**: `crates/cli/src/main.rs`, `crates/cli/src/agent.rs`, `crates/provider/src/openai/chat_completions.rs`
+- **Features**:
+  - `clawcr prompt <text>` - non-interactive subcommand (sends message, prints response, exits)
+  - `clawcr --model <name>` - global CLI flag to override default model
+  - `clawcr doctor` - diagnostic command (checks toolchain, config, provider, catalog)
+  - `CLAWCR_REQUEST_TIMEOUT` env var for HTTP timeout (default: 300s)
+- **Status**: OPEN - awaiting maintainer review/merge
 
-### Open PRs
-| # | Title | Status |
-|---|-------|--------|
-| #37 | feat: prompt subcommand, --model flag, doctor command | OPEN - awaiting merge |
+### US-036 (Issue #36) OPEN - CJK text streaming panic
+- **Issue**: #36 - panic on CJK text in streaming response
+- **Root cause**: `earliest_partial_start()` used byte indexing instead of char_indices()
+- **Status**: Upstream says already fixed in main - likely duplicate, do not PR
 
-### Open Issues
-| # | Title | Status |
-|---|-------|--------|
-| #35 | feat: non-interactive prompt mode | CLOSED (by PR #37) |
-| #36 | bug: CJK panic | OPEN - upstream says already fixed |
+### Streaming Fix LOCAL ONLY - read_timeout improvement
+- **Files**: `crates/provider/src/openai/chat_completions.rs`, `stream.rs`
+- **Changes**:
+  - `.timeout()` → `.read_timeout()` (resets on each data chunk)
+  - Improved error messages for timeout/decoding errors
+- **Testing**: Short prompts pass 5/5, long prompts intermittently fail
+- **Root cause**: NVIDIA NIM API instability + reqwest_eventsource compatibility
+- **Status**: Not committed - requires more testing before PR
 
-### Streaming Fix
-- Status: LOCAL ONLY (not committed)
-- Files: `chat_completions.rs` (timeout→read_timeout), `stream.rs` (improved error messages)
-- Testing: Short prompts pass 5/5, long prompts intermittently fail
-- Root cause: NVIDIA NIM API instability + reqwest_eventsource compatibility
-- Recommendation: Keep local until verified stable
+### AGENTS.md Setup COMPLETED
+- Established autonomous agent mode
+- Added startup protocol: read progress.txt + check git log on fresh sessions
+- Added commit-after-every-change rule
+- Created progress.txt for lightweight status tracking
 
-## Recent Commits (local main)
-- `4a5d596` feat: add prompt subcommand, --model flag, doctor command, and request timeout
-- `a8aaf41` fix: panic on CJK text in streaming response (char boundary issue)
+## Verification Status
+- `cargo build --release`: PASSED
+- `clawcr prompt "hi"`: PASSED (short prompt)
+
+## Pre-existing Features (verified working)
+- Interactive TUI mode
+- Server mode (`clawcr server`)
+- Onboarding wizard (`clawcr onboard`)
+- NVIDIA NIM provider support (`stepfun-ai/step-3.5-flash`)
+
+## Known Issues
+- Complex prompts sometimes fail with `error decoding response body` - likely NVIDIA NIM API instability
+- Other NVIDIA NIM models unavailable (404 errors)
+- Context compaction needs LLM-based compression (see query.rs TODOs)
 
 ## Upstream Activity
 - `3200938` (latest): Merge PR #34 (fix config BUG + markdown TUI)
-- `c9ed44f`: Merge PR #27: feat: implement skills (big feature by Distortedlogic)
+- `c9ed44f`: Merge PR #27: feat: implement skills
 - Our local diverged from upstream at `ae60725`
 
-## Git Strategy
-- Branch: `main` (diverged from upstream)
-- PR branch: `feat/prompt-cli-only` → PR #37
-- Remote: `upstream` → 7df-lab/claw-code-rust, `origin` → bigmanBass666/claw-code-rust
-- **Commits are local-only until merged to upstream** - safe to commit frequently on local branches
-
-## Key Files Changed (local, uncommitted)
-- `AGENTS.md` - autonomous agent mode rules + commit-after-every-change rule
-- `progress.txt` - new project status tracking file
+## Git Status
+- **Branch**: `main` (diverged from upstream)
+- **PR branch**: `feat/prompt-cli-only` → PR #37
+- **Remote**: `origin` → bigmanBass666/claw-code-rust, `upstream` → 7df-lab/claw-code-rust
