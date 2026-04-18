@@ -1,4 +1,7 @@
 {"timestamp":"2026-04-17T15:55:13Z","type":"pr_comment","repo":"7df-lab/claw-code-rust","pr_number":37,"commenter":"wangtsiao","comment_preview":"Looks good to me, really nice work on this. Merging now.","sentiment_analysis":"strongly_positive"}
 {"timestamp":"2026-04-17T15:55:17Z","type":"pr_merge","repo":"7df-lab/claw-code-rust","pr_number":37,"title":"feat: add prompt subcommand, --model flag, doctor command, and request timeout","merged_by":"wangtsiao"}
+{"timestamp":"2026-04-18T00:12:03Z","type":"pr_comment","repo":"7df-lab/claw-code-rust","pr_number":40,"commenter":"wangtsiao","comment_preview":"Looks good to me! Appreciate the quick fix here.","sentiment_analysis":"positive"}
+{"timestamp":"2026-04-18T00:12:10Z","type":"pr_merge","repo":"7df-lab/claw-code-rust","pr_number":40,"title":"fix: handle null arrays in OpenAI-compatible API responses (v2)","merged_by":"wangtsiao"}
+{"timestamp":"2026-04-18T00:13:03Z","type":"pr_comment","repo":"7df-lab/claw-code-rust","pr_number":41,"commenter":"wangtsiao","comment_preview":"Oh, I totally missed that! Good catch!","sentiment_analysis":"positive"}
 {"timestamp":"2026-04-17T21:42:39Z","type":"pr_updated","repo":"7df-lab/claw-code-rust","pr_number":39,"title":"chore: fix clippy warnings across workspace","state":"open","user_login":"bigmanBass666"}
-{"timestamp":"2026-04-17T21:49:23Z","type":"pr_closed","repo":"7df-lab/claw-code-rust","pr_number":38,"title":"fix: handle null arrays in OpenAI-compatible API responses","state":"closed","user_login":"bigmanBass666"}
+{"timestamp":"2026-04-17T21:49:23Z","type":"pr_closed","repo":"7df-lab/claw-code-rust","pr_number":38,"title":"fix: handle null arrays in OpenAI-compatible API responses (v1)","state":"closed"}
