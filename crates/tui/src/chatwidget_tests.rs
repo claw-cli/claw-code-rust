@@ -25,11 +25,20 @@ fn widget_with_model(
     model: Model,
     cwd: PathBuf,
 ) -> (ChatWidget, mpsc::UnboundedReceiver<AppEvent>) {
+    widget_with_model_and_thinking(model, cwd, None)
+}
+
+fn widget_with_model_and_thinking(
+    model: Model,
+    cwd: PathBuf,
+    initial_thinking_selection: Option<String>,
+) -> (ChatWidget, mpsc::UnboundedReceiver<AppEvent>) {
     let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
     let widget = ChatWidget::new_with_app_event(ChatWidgetInit {
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model)),
+        initial_thinking_selection,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -49,6 +58,7 @@ fn onboarding_widget_with_model(
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model)),
+        initial_thinking_selection: None,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -103,6 +113,24 @@ fn thinking_entries_are_generated_from_model_capability_options() {
             },
         ]
     );
+}
+
+#[test]
+fn initial_thinking_selection_overrides_model_default() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        thinking_capability: ThinkingCapability::Levels(vec![
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+        ]),
+        default_reasoning_effort: Some(ReasoningEffort::Medium),
+        ..Model::default()
+    };
+    let (widget, _app_event_rx) =
+        widget_with_model_and_thinking(model, PathBuf::from("."), Some("low".to_string()));
+
+    assert_eq!(widget.current_thinking_selection(), Some("low"));
 }
 
 #[test]
@@ -364,6 +392,7 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
+        initial_thinking_selection: None,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -471,6 +500,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
+        initial_thinking_selection: None,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,

@@ -61,6 +61,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) frame_requester: FrameRequester,
     pub(crate) app_event_tx: AppEventSender,
     pub(crate) initial_session: TuiSessionState,
+    pub(crate) initial_thinking_selection: Option<String>,
     pub(crate) initial_user_message: Option<UserMessage>,
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) is_first_run: bool,
@@ -69,7 +70,10 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) startup_tooltip_override: Option<String>,
 }
 
-/// Live UI projection of the active session identity.
+/// Resolved runtime session projection owned by the chat widget.
+///
+/// Unlike `InitialTuiSession`, this is internal TUI state: the model slug has already been resolved
+/// into model metadata when available, and provider is derived from that projection.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TuiSessionState {
     pub(crate) cwd: PathBuf,
@@ -296,6 +300,7 @@ impl ChatWidget {
             frame_requester,
             app_event_tx,
             initial_session,
+            initial_thinking_selection,
             initial_user_message,
             enhanced_keys_supported,
             is_first_run,
@@ -304,10 +309,12 @@ impl ChatWidget {
             startup_tooltip_override,
         } = common;
 
-        let thinking_selection = initial_session
-            .model
-            .as_ref()
-            .and_then(Model::default_thinking_selection);
+        let thinking_selection = initial_thinking_selection.or_else(|| {
+            initial_session
+                .model
+                .as_ref()
+                .and_then(Model::default_thinking_selection)
+        });
         let mut queued_user_messages = VecDeque::new();
         if let Some(initial_user_message) = initial_user_message {
             queued_user_messages.push_back(initial_user_message);

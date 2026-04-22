@@ -10,6 +10,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::app::AppExit;
+use crate::app::InitialTuiSession;
 use crate::app::InteractiveTuiConfig;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
@@ -25,6 +26,8 @@ use crate::tui::Tui;
 use crate::tui::TuiEvent;
 use crate::worker::QueryWorkerConfig;
 use crate::worker::QueryWorkerHandle;
+
+const APP_EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone)]
 struct PendingOnboarding {
@@ -68,10 +71,9 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         thinking_selection: initial_session.thinking_selection.clone(),
     });
 
-    // TODO: Should we change it to bounded channel?
-    // app events, such as `[AppEvent::Command]`, `[AppEvent::Exit]`
-    let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
-    let app_event_sender = AppEventSender::new(app_event_tx);
+    // App events come from widgets and request host-level actions such as commands or exit.
+    let (app_event_tx, mut app_event_rx) = mpsc::channel(APP_EVENT_CHANNEL_CAPACITY);
+    let app_event_sender = AppEventSender::new_bounded(app_event_tx);
 
     // Resolve model metadata for the chat widget, falling back to the session slug.
     let available_models = config
@@ -81,22 +83,9 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         .cloned()
         .collect::<Vec<_>>();
 
-    // TODO: there is a check: whether initial_session.model exists at model_catalog, I think the check should
-    // outside `run_interactive_tui`, at who invoke run_interactive_tui, check, if not exist, then pick one
-    // then update the config.toml file.
-    let model = config
-        .model_catalog
-        .get(&initial_session.model)
-        .cloned()
-        .unwrap_or_else(|| Model {
-            slug: initial_session.model.clone(),
-            display_name: initial_session.model.clone(),
-            provider: initial_session.provider,
-            ..Model::default()
-        });
+    let model = resolve_initial_model(&initial_session, &config.model_catalog);
     let cwd = initial_session.cwd.clone();
 
-    // TODO: PnedingOnboarding lack ProviderWireAPI type, such as OpenAI Chat Completions, OpenAI Responses, Anthropic Messages.
     let mut loop_state = InteractiveLoopState::default();
 
     // Create the root chat widget that owns visible TUI state and input handling.
@@ -104,6 +93,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         frame_requester: tui.frame_requester(),
         app_event_tx: app_event_sender,
         initial_session: TuiSessionState::new(cwd.clone(), Some(model)),
+        initial_thinking_selection: initial_session.thinking_selection.clone(),
         initial_user_message: None,
         enhanced_keys_supported: tui.enhanced_keys_supported(),
         is_first_run: true,
@@ -111,9 +101,6 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         show_model_onboarding: config.show_model_onboarding,
         startup_tooltip_override: Some(format!("Ready in {}", cwd.display())),
     });
-    if let Some(thinking_selection) = initial_session.thinking_selection {
-        chat_widget.set_thinking_selection(Some(thinking_selection));
-    }
 
     // tui events, such as `[TuiEvent::Draw]`, `[TuiEvent::Key]`, `TuiEvent::Paste`
     let events = tui.event_stream();
@@ -182,6 +169,21 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
     })
 }
 
+fn resolve_initial_model(
+    initial_session: &InitialTuiSession,
+    model_catalog: &impl ModelCatalog,
+) -> Model {
+    model_catalog
+        .get(&initial_session.model)
+        .cloned()
+        .unwrap_or_else(|| Model {
+            slug: initial_session.model.clone(),
+            display_name: initial_session.model.clone(),
+            provider: initial_session.provider,
+            ..Model::default()
+        })
+}
+
 fn clear_before_exit(tui: &mut Tui) -> Result<()> {
     if tui.is_alt_screen_active() {
         tui.leave_alt_screen()?;
@@ -212,6 +214,7 @@ fn handle_tui_event(
 
             // Wrap pending scrollback using the current terminal width.
             let width = tui.terminal.size()?.width.max(1);
+            // Completed transcript lines are written directly above the live inline viewport.
             let scrollback_lines = chat_widget.drain_scrollback_lines(width);
             if !scrollback_lines.is_empty() {
                 tui.insert_history_lines(scrollback_lines);
@@ -278,11 +281,7 @@ fn handle_app_event(
         return Ok(LoopAction::ClearAndExit);
     };
 
-    if let AppEvent::Exit(exit_mode) = &app_event {
-        // Shutdown requests may need the normal screen restored before clearing it.
-        if matches!(exit_mode, crate::app_event::ExitMode::ShutdownFirst) {
-            return Ok(LoopAction::ClearAndExit);
-        }
+    if let AppEvent::Exit(_) = &app_event {
         return Ok(LoopAction::ClearAndExit);
     }
 
@@ -421,12 +420,6 @@ fn handle_app_command(
             if let Some(thinking) = thinking {
                 worker.set_thinking(thinking.clone())?;
             }
-        }
-        AppCommand::RunUserShellCommand { command } if command == "session new" => {
-            worker.start_new_session()?;
-        }
-        AppCommand::RunUserShellCommand { command } if command == "session list" => {
-            worker.list_sessions()?;
         }
         AppCommand::RunUserShellCommand { command } if command.starts_with("onboard ") => {
             let payload = command.trim_start_matches("onboard ");
