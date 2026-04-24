@@ -49,6 +49,7 @@ use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
 use crate::events::WorkerEvent;
 use crate::exec_cell::truncated_tool_output_preview;
+use crate::get_git_diff::get_git_diff;
 use crate::history_cell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
@@ -58,7 +59,6 @@ use crate::slash_command::SlashCommand;
 use crate::streaming::controller::StreamController;
 use crate::tui::frame_requester::FrameRequester;
 use devo_utils::ansi_escape::ansi_escape_line;
-use crate::get_git_diff::get_git_diff;
 
 /// Common initialization parameters shared by `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
@@ -255,7 +255,7 @@ impl ChatWidget {
     }
 
     fn completed_dot_prefix() -> Line<'static> {
-        Line::from("• ".green())
+        Line::from("• ".cyan())
     }
 
     fn pending_dot_prefix() -> Line<'static> {
@@ -287,7 +287,7 @@ impl ChatWidget {
     }
 
     fn tool_dot_prefix() -> Line<'static> {
-        Self::completed_dot_prefix()
+        Line::from("• ".green())
     }
 
     fn failed_dot_prefix() -> Line<'static> {
@@ -342,8 +342,7 @@ impl ChatWidget {
 
         format!(
             "model {model} | thinking {thinking} | tokens {} in / {} out | {context}",
-            self.total_input_tokens,
-            self.total_output_tokens
+            self.total_input_tokens, self.total_output_tokens
         )
     }
 
@@ -564,10 +563,7 @@ impl ChatWidget {
                 } else {
                     text.lines().map(ansi_escape_line).collect()
                 };
-                let mut all_lines = vec![
-                    Line::from("Git Diff".bold()),
-                    Line::from(""),
-                ];
+                let mut all_lines = vec![Line::from("Git Diff".bold()), Line::from("")];
                 all_lines.extend(lines);
                 self.add_to_history(PlainHistoryCell::new(all_lines));
                 self.set_status_message("Diff shown");

@@ -1,5 +1,6 @@
 use crate::history_cell::HistoryCell;
 use crate::history_cell::{self};
+use ratatui::style::Stylize;
 use ratatui::text::Line;
 use std::path::Path;
 use std::time::Duration;
@@ -106,17 +107,26 @@ impl StreamController {
         if lines.is_empty() {
             return None;
         }
-        Some(Box::new(history_cell::AgentMessageCell::new(lines, {
-            let header_emitted = self.header_emitted;
-            self.header_emitted = true;
-            !header_emitted
-        })))
+        let initial_prefix = if self.header_emitted {
+            "  ".into()
+        } else {
+            Line::from("• ".cyan())
+        };
+        let is_stream_continuation = self.header_emitted;
+        self.header_emitted = true;
+        Some(Box::new(history_cell::AgentMessageCell::new_with_prefix(
+            lines,
+            initial_prefix,
+            "  ",
+            is_stream_continuation,
+        )))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
     use std::path::PathBuf;
 
     fn test_cwd() -> PathBuf {
@@ -136,6 +146,22 @@ mod tests {
                     .join("")
             })
             .collect()
+    }
+
+    #[test]
+    fn first_committed_stream_chunk_uses_blue_dot_prefix() {
+        let mut ctrl = StreamController::new(Some(80), &test_cwd());
+
+        ctrl.push("hello\n");
+        let (cell, _idle) = ctrl.on_commit_tick();
+
+        let cell = cell.expect("expected committed cell");
+        let rendered = cell.display_lines(80);
+        let first_line = rendered.first().expect("expected rendered line");
+        let first_span = first_line.spans.first().expect("expected prefix span");
+
+        assert_eq!(first_span.content.as_ref(), "• ");
+        assert_eq!(first_span.style.fg, Some(Color::Blue));
     }
 
     #[tokio::test]

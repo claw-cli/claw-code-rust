@@ -1,0 +1,138 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Matrix build ─────────────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+            archive: tar.gz
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-gnu
+            ext: ""
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            ext: ""
+            archive: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            ext: ""
+            archive: tar.gz
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} -p devo-cli
+
+      - name: Strip symbols (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: strip target/${{ matrix.target }}/release/devo${{ matrix.ext }}
+
+      - name: Prepare staging directory
+        shell: bash
+        run: |
+          staging=devo-${{ github.ref_name }}-${{ matrix.target }}
+          mkdir -p "$staging"
+          cp target/${{ matrix.target }}/release/devo${{ matrix.ext }} "$staging/"
+          cp README.md LICENSE "$staging/" 2>/dev/null || true
+          echo "STAGING=$staging" >> "$GITHUB_ENV"
+
+      - name: Create tar.gz archive (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: tar czf "${{ env.STAGING }}.tar.gz" "${{ env.STAGING }}"
+
+      - name: Create zip archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $staging = "$env:STAGING"
+          Compress-Archive -Path "$staging/*" -DestinationPath "$staging.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: devo-${{ github.ref_name }}-${{ matrix.target }}
+          path: devo-${{ github.ref_name }}-${{ matrix.target }}.*
+
+  # ── Create GitHub Release ──────────────────────────────────────────────
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts
+
+      - name: Generate release notes
+        run: |
+          cat > release-notes.md <<'NOTES'
+  ## Install
+
+  ### Build from source
+
+  ```bash
+  git clone https://github.com/${{ github.repository }}.git
+  cd devo
+  cargo build --release
+
+  # Linux / macOS
+  ./target/release/devo onboard
+
+  # Windows
+  .\target\release\devo onboard
+  ```
+
+  ### Prebuilt binary
+
+  Download the archive for your platform from the Assets section below, extract it, and place the `devo` (or `devo.exe` on Windows) binary somewhere in your `PATH`.
+
+  Supported platforms:
+  - Linux x86\_64 (`x86_64-unknown-linux-gnu`)
+  - Linux ARM64 (`aarch64-unknown-linux-gnu`)
+  - macOS Intel (`x86_64-apple-darwin`)
+  - macOS Apple Silicon (`aarch64-apple-darwin`)
+  - Windows x86\_64 (`x86_64-pc-windows-msvc`)
+
+  ---
+
+  Full changelog at [commits](https://github.com/${{ github.repository }}/commits/${{ github.ref_name }}).
+  NOTES
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md
+          draft: true
+          files: artifacts/*
+          generate_release_notes: true
