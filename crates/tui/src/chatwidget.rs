@@ -426,8 +426,20 @@ impl ChatWidget {
         );
 
         let loaded_any_history = !history_items.is_empty();
-        for item in history_items {
-            self.add_transcript_item_without_redraw(item);
+        for item in &history_items {
+            self.add_transcript_item_without_redraw(item.clone());
+            if let Some(duration_ms) = item.duration_ms {
+                let model_name = self
+                    .session
+                    .model
+                    .as_ref()
+                    .map(|m| m.display_name.clone())
+                    .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
+                    .unwrap_or_default();
+                self.add_history_entry_without_redraw(Box::new(
+                    history_cell::TurnSummaryCell::new(model_name, Some(duration_ms / 1000)),
+                ));
+            }
         }
         if !loaded_any_history {
             self.add_history_entry_without_redraw(Box::new(history_cell::new_info_event(
@@ -577,14 +589,30 @@ impl ChatWidget {
                 local_images,
                 mention_bindings,
             } => {
-                let user_message = UserMessage {
-                    text,
-                    local_images,
-                    remote_image_urls: Vec::new(),
-                    text_elements,
-                    mention_bindings,
-                };
-                self.submit_user_message(user_message);
+                if self.busy && !text.trim().is_empty() {
+                    // Turn is active — queue the input instead of submitting directly.
+                    self.pending_steers.push(text.clone());
+                    self.sync_pending_preview();
+                    self.app_event_tx
+                        .send(AppEvent::Command(AppCommand::user_turn(
+                            vec![devo_protocol::InputItem::Text { text }],
+                            Some(self.session.cwd.clone()),
+                            self.session.model.as_ref().map(|m| m.slug.clone()),
+                            self.thinking_selection.clone(),
+                            /*sandbox*/ None,
+                            /*approval_policy*/ None,
+                        )));
+                    self.set_status_message("Message queued");
+                } else {
+                    let user_message = UserMessage {
+                        text,
+                        local_images,
+                        remote_image_urls: Vec::new(),
+                        text_elements,
+                        mention_bindings,
+                    };
+                    self.submit_user_message(user_message);
+                }
             }
             InputResult::Command { command, argument } => {
                 self.handle_slash_command(command, argument);

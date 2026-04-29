@@ -48,7 +48,7 @@ impl SlashCommand {
     }
 
     pub fn supports_inline_args(self) -> bool {
-        matches!(self, SlashCommand::Model)
+        matches!(self, SlashCommand::Model | SlashCommand::Btw)
     }
 
     pub fn available_during_task(self) -> bool {

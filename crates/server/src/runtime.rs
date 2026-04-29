@@ -1194,17 +1194,23 @@ impl ServerRuntime {
                     metadata: None,
                     created_at: chrono::Utc::now(),
                 });
-                let pending_count = core_session
-                    .pending_user_prompts
-                    .lock()
-                    .expect("lock")
-                    .len();
+                let (pending_count, pending_texts) = {
+                    let queue = core_session.pending_user_prompts.lock().expect("lock");
+                    let texts: Vec<String> = queue
+                        .iter()
+                        .filter_map(|item| match &item.kind {
+                            devo_core::PendingInputKind::UserText { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    (texts.len(), texts)
+                };
                 drop(core_session);
                 self.broadcast_event(ServerEvent::InputQueueUpdated(
                     devo_core::InputQueueUpdatedPayload {
                         session_id: params.session_id,
                         pending_count,
-                        pending_texts: vec![display_input.clone()],
+                        pending_texts,
                     },
                 ))
                 .await;
@@ -1260,6 +1266,19 @@ impl ServerRuntime {
                 .lock()
                 .expect("steering queue mutex should not be poisoned")
                 .clear();
+            let clear_session_id = params.session_id;
+            let runtime_for_broadcast = Arc::clone(self);
+            tokio::spawn(async move {
+                runtime_for_broadcast
+                    .broadcast_event(ServerEvent::InputQueueUpdated(
+                        devo_core::InputQueueUpdatedPayload {
+                            session_id: clear_session_id,
+                            pending_count: 0,
+                            pending_texts: vec![],
+                        },
+                    ))
+                    .await;
+            });
             let runtime = Arc::clone(self);
             let turn_for_task = turn.clone();
             let display_input_for_task = display_input.clone();
