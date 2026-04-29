@@ -202,7 +202,6 @@ pub(crate) struct UserHistoryCell {
     #[allow(dead_code)]
     pub local_image_paths: Vec<PathBuf>,
     pub remote_image_urls: Vec<String>,
-    pub queued: bool,
 }
 
 /// Build logical lines for a user message with styled text elements.
@@ -325,10 +324,6 @@ impl HistoryCell for UserHistoryCell {
 
         if let Some(wrapped_message) = wrapped_message {
             lines.extend(prefix_lines(wrapped_message, "┃ ".cyan(), "┃ ".cyan()));
-        }
-
-        if self.queued {
-            lines.push(Line::from("  QUEUED".cyan().bold()));
         }
 
         lines.push(Line::from(""));
@@ -1065,22 +1060,6 @@ pub(crate) fn new_user_prompt(
         text_elements,
         local_image_paths,
         remote_image_urls,
-        queued: false,
-    }
-}
-
-pub(crate) fn new_queued_user_prompt(
-    message: String,
-    text_elements: Vec<TextElement>,
-    local_image_paths: Vec<PathBuf>,
-    remote_image_urls: Vec<String>,
-) -> UserHistoryCell {
-    UserHistoryCell {
-        message,
-        text_elements,
-        local_image_paths,
-        remote_image_urls,
-        queued: true,
     }
 }
 

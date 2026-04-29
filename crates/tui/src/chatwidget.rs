@@ -58,14 +58,12 @@ use crate::history_cell::AI_REPLY_WRAP_WIDTH;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::ScrollbackLine;
-use crate::history_cell::UserHistoryCell;
 use crate::markdown::append_markdown;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::streaming::controller::StreamController;
 use crate::tui::frame_requester::FrameRequester;
 use devo_utils::ansi_escape::ansi_escape_line;
-use std::any::Any;
 
 /// Common initialization parameters shared by `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
@@ -565,17 +563,8 @@ impl ChatWidget {
                 mention_bindings,
             } => {
                 if self.busy && !text.trim().is_empty() {
-                    // Turn is active — add a queued input cell to history
-                    // immediately, then send to server which will queue it.
-                    self.add_to_history(history_cell::new_queued_user_prompt(
-                        text.clone(),
-                        text_elements.clone(),
-                        local_images
-                            .iter()
-                            .map(|a| a.path.clone())
-                            .collect::<Vec<_>>(),
-                        Vec::new(),
-                    ));
+                    // Turn is active — show in bottom pane as pending cell.
+                    self.bottom_pane.push_pending_cell(text.clone());
                     self.queued_count += 1;
                     self.app_event_tx
                         .send(AppEvent::Command(AppCommand::user_turn(
@@ -1756,17 +1745,17 @@ impl ChatWidget {
         self.frame_requester.schedule_frame();
     }
 
-    /// Find the first queued UserHistoryCell in history and mark it as delivered.
+    /// Pop the oldest pending cell from the bottom pane and add it to history
+    /// as a normal user input cell.
     fn unqueue_oldest_pending(&mut self) {
-        for cell in self.history.iter_mut().rev() {
-            let any_ref: &mut dyn Any = (*cell).as_mut();
-            if let Some(user_cell) = any_ref.downcast_mut::<UserHistoryCell>() {
-                if user_cell.queued {
-                    user_cell.queued = false;
-                    self.queued_count = self.queued_count.saturating_sub(1);
-                    return;
-                }
-            }
+        if let Some(text) = self.bottom_pane.pop_oldest_pending_cell() {
+            self.add_to_history(history_cell::new_user_prompt(
+                text,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ));
+            self.queued_count = self.queued_count.saturating_sub(1);
         }
     }
 

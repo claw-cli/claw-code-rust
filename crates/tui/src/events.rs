@@ -219,6 +219,8 @@ pub(crate) struct TranscriptItem {
     pub fold_next_at: Option<Instant>,
     /// Current fold stage for tool outputs.
     pub fold_stage: u8,
+    /// Duration of the turn that produced this item (milliseconds), if known.
+    pub duration_ms: Option<u64>,
 }
 
 impl TranscriptItem {
@@ -234,6 +236,7 @@ impl TranscriptItem {
             body: body.into(),
             fold_next_at: None,
             fold_stage: 0,
+            duration_ms: None,
         }
     }
 
@@ -257,6 +260,12 @@ impl TranscriptItem {
     pub(crate) fn with_fold_stage(mut self, stage: u8) -> Self {
         self.fold_stage = stage;
         self.fold_next_at = None;
+        self
+    }
+
+    /// Attaches turn duration metadata to this transcript item.
+    pub(crate) fn with_duration(mut self, duration_ms: u64) -> Self {
+        self.duration_ms = Some(duration_ms);
         self
     }
 }

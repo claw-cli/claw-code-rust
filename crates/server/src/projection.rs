@@ -42,20 +42,20 @@ impl DefaultProjection {
                         } else {
                             SessionHistoryItemKind::Assistant
                         };
-                        history.push(SessionHistoryItem {
-                            tool_call_id: None,
+                        history.push(SessionHistoryItem::new(
+                            None,
                             kind,
-                            title: String::new(),
-                            body: text.clone(),
-                        });
+                            String::new(),
+                            text.clone(),
+                        ));
                     }
                     ContentBlock::ToolUse { id, name, input } => {
-                        history.push(SessionHistoryItem {
-                            tool_call_id: Some(id.clone()),
-                            kind: SessionHistoryItemKind::ToolCall,
-                            title: summarize_tool_call(name, input),
-                            body: String::new(),
-                        });
+                        history.push(SessionHistoryItem::new(
+                            Some(id.clone()),
+                            SessionHistoryItemKind::ToolCall,
+                            summarize_tool_call(name, input),
+                            String::new(),
+                        ));
                     }
                     ContentBlock::ToolResult {
                         tool_use_id,
@@ -63,28 +63,28 @@ impl DefaultProjection {
                         is_error,
                         ..
                     } => {
-                        history.push(SessionHistoryItem {
-                            tool_call_id: Some(tool_use_id.clone()),
-                            kind: if *is_error {
+                        history.push(SessionHistoryItem::new(
+                            Some(tool_use_id.clone()),
+                            if *is_error {
                                 SessionHistoryItemKind::Error
                             } else {
                                 SessionHistoryItemKind::ToolResult
                             },
-                            title: if *is_error {
+                            if *is_error {
                                 "Tool error".to_string()
                             } else {
                                 "Tool output".to_string()
                             },
-                            body: content.clone(),
-                        });
+                            content.clone(),
+                        ));
                     }
                     ContentBlock::Reasoning { text } if !text.is_empty() => {
-                        history.push(SessionHistoryItem {
-                            tool_call_id: None,
-                            kind: SessionHistoryItemKind::Reasoning,
-                            title: String::new(),
-                            body: text.clone(),
-                        });
+                        history.push(SessionHistoryItem::new(
+                            None,
+                            SessionHistoryItemKind::Reasoning,
+                            String::new(),
+                            text.clone(),
+                        ));
                     }
                     ContentBlock::Reasoning { .. } => {}
                     ContentBlock::Text { .. } => {}
@@ -99,59 +99,59 @@ impl DefaultProjection {
 pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHistoryItem> {
     match item {
         TurnItem::UserMessage(TextItem { text }) | TurnItem::SteerInput(TextItem { text }) => {
-            Some(SessionHistoryItem {
-                tool_call_id: None,
-                kind: SessionHistoryItemKind::User,
-                title: String::new(),
-                body: text.clone(),
-            })
+            Some(SessionHistoryItem::new(
+                None,
+                SessionHistoryItemKind::User,
+                String::new(),
+                text.clone(),
+            ))
         }
         TurnItem::AgentMessage(TextItem { text })
         | TurnItem::Plan(TextItem { text })
         | TurnItem::WebSearch(TextItem { text })
         | TurnItem::ImageGeneration(TextItem { text })
-        | TurnItem::HookPrompt(TextItem { text }) => Some(SessionHistoryItem {
-            tool_call_id: None,
-            kind: SessionHistoryItemKind::Assistant,
-            title: String::new(),
-            body: text.clone(),
-        }),
+        | TurnItem::HookPrompt(TextItem { text }) => Some(SessionHistoryItem::new(
+            None,
+            SessionHistoryItemKind::Assistant,
+            String::new(),
+            text.clone(),
+        )),
         TurnItem::ContextCompaction(TextItem { .. }) => None,
-        TurnItem::Reasoning(TextItem { text }) => Some(SessionHistoryItem {
-            tool_call_id: None,
-            kind: SessionHistoryItemKind::Reasoning,
-            title: String::new(),
-            body: text.clone(),
-        }),
+        TurnItem::Reasoning(TextItem { text }) => Some(SessionHistoryItem::new(
+            None,
+            SessionHistoryItemKind::Reasoning,
+            String::new(),
+            text.clone(),
+        )),
         TurnItem::ToolCall(ToolCallItem {
             tool_call_id,
             tool_name,
             input,
-        }) => Some(SessionHistoryItem {
-            tool_call_id: Some(tool_call_id.clone()),
-            kind: SessionHistoryItemKind::ToolCall,
-            title: summarize_tool_call(tool_name, input),
-            body: String::new(),
-        }),
+        }) => Some(SessionHistoryItem::new(
+            Some(tool_call_id.clone()),
+            SessionHistoryItemKind::ToolCall,
+            summarize_tool_call(tool_name, input),
+            String::new(),
+        )),
         TurnItem::ToolResult(ToolResultItem {
             tool_call_id,
             tool_name,
             output,
             is_error,
             ..
-        }) => Some(SessionHistoryItem {
-            tool_call_id: Some(tool_call_id.clone()),
-            kind: if *is_error {
+        }) => Some(SessionHistoryItem::new(
+            Some(tool_call_id.clone()),
+            if *is_error {
                 SessionHistoryItemKind::Error
             } else {
                 SessionHistoryItemKind::ToolResult
             },
-            title: summarize_tool_result(tool_name.as_deref(), *is_error),
-            body: match output {
+            summarize_tool_result(tool_name.as_deref(), *is_error),
+            match output {
                 serde_json::Value::String(text) => text.clone(),
                 other => other.to_string(),
             },
-        }),
+        )),
         TurnItem::ToolProgress(_)
         | TurnItem::ApprovalRequest(_)
         | TurnItem::ApprovalDecision(_) => None,

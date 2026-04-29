@@ -41,6 +41,7 @@ use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::bottom_pane_view::BottomPaneView;
 use crate::bottom_pane::pending_thread_approvals::PendingThreadApprovals;
 use crate::bottom_pane::unified_exec_footer::UnifiedExecFooter;
+use crate::render::line_utils::prefix_lines;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::status_indicator_widget::StatusIndicatorWidget;
@@ -135,6 +136,9 @@ pub(crate) struct BottomPane {
     frame_requester: FrameRequester,
     unified_exec_footer: UnifiedExecFooter,
     pending_thread_approvals: PendingThreadApprovals,
+    /// User messages queued while a turn was active, shown above the composer
+    /// as pending cells. Each entry is the raw text of one queued prompt.
+    pending_cell_texts: Vec<String>,
     placeholder_text: String,
     /// Status indicator shown above the composer while a task is running.
     status: Option<StatusIndicatorWidget>,
@@ -179,6 +183,7 @@ impl BottomPane {
             frame_requester,
             unified_exec_footer: UnifiedExecFooter::new(),
             pending_thread_approvals: PendingThreadApprovals::new(),
+            pending_cell_texts: Vec::new(),
             placeholder_text,
             status: None,
             is_task_running: false,
@@ -390,6 +395,32 @@ impl BottomPane {
         }
     }
 
+    pub(crate) fn push_pending_cell(&mut self, text: String) {
+        self.pending_cell_texts.push(text);
+        self.request_redraw();
+    }
+
+    /// Pop the oldest pending cell (FIFO). Returns its text, or None if empty.
+    pub(crate) fn pop_oldest_pending_cell(&mut self) -> Option<String> {
+        if self.pending_cell_texts.is_empty() {
+            return None;
+        }
+        let result = Some(self.pending_cell_texts.remove(0));
+        self.request_redraw();
+        result
+    }
+
+    pub(crate) fn has_pending_cells(&self) -> bool {
+        !self.pending_cell_texts.is_empty()
+    }
+
+    pub(crate) fn clear_pending_cells(&mut self) {
+        if !self.pending_cell_texts.is_empty() {
+            self.pending_cell_texts.clear();
+            self.request_redraw();
+        }
+    }
+
     pub(crate) fn ensure_status_indicator(&mut self) {
         if self.status.is_none() {
             self.status = Some(StatusIndicatorWidget::new(
@@ -580,6 +611,52 @@ impl BottomPane {
     }
 }
 
+/// Thin renderable wrapper around a slice of pending cell texts.
+/// Each cell is rendered with a `┃` prefix and a `QUEUED` badge, matching the
+/// style of a normal user input cell in the history transcript.
+struct PendingCellList<'a> {
+    texts: &'a [String],
+}
+
+impl Renderable for PendingCellList<'_> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        if area.is_empty() || self.texts.is_empty() {
+            return;
+        }
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for text in self.texts {
+            let wrapped = crate::wrapping::adaptive_wrap_lines(
+                text.lines().map(|line| Line::from(line.to_string())),
+                crate::wrapping::RtOptions::new(area.width as usize)
+                    .subsequent_indent(Line::from("┃ ".cyan())),
+            );
+            lines.push(Line::from(""));
+            if !wrapped.is_empty() {
+                lines.extend(prefix_lines(wrapped, "┃ ".cyan(), "┃ ".cyan()));
+            }
+            lines.push(Line::from("  QUEUED".cyan().bold()));
+        }
+        Paragraph::new(lines).render(area, buf);
+    }
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        if self.texts.is_empty() {
+            return 0;
+        }
+        // Each cell: blank line + wrapped content + QUEUED badge
+        let content_lines: usize = self
+            .texts
+            .iter()
+            .map(|t| {
+                let line_count = t.lines().count();
+                // blank + content + QUEUED
+                line_count + 2
+            })
+            .sum();
+        content_lines as u16
+    }
+}
+
 impl Renderable for BottomPane {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         if area.is_empty() {
@@ -598,7 +675,14 @@ impl Renderable for BottomPane {
         if self.status.is_none() && !self.unified_exec_footer.is_empty() {
             children.push(&self.unified_exec_footer);
         }
-        children.extend_from_slice(&[&self.pending_thread_approvals, &self.composer]);
+        let pending_cells = PendingCellList {
+            texts: &self.pending_cell_texts,
+        };
+        if pending_cells.desired_height(area.width) > 0 {
+            children.push(&pending_cells);
+        }
+        children.push(&self.pending_thread_approvals);
+        children.push(&self.composer);
         self.render_children(area, buf, &children);
     }
 
@@ -613,7 +697,14 @@ impl Renderable for BottomPane {
         if self.status.is_none() && !self.unified_exec_footer.is_empty() {
             children.push(&self.unified_exec_footer);
         }
-        children.extend_from_slice(&[&self.pending_thread_approvals, &self.composer]);
+        let pending_cells = PendingCellList {
+            texts: &self.pending_cell_texts,
+        };
+        if pending_cells.desired_height(width) > 0 {
+            children.push(&pending_cells);
+        }
+        children.push(&self.pending_thread_approvals);
+        children.push(&self.composer);
         self.desired_children_height(width, &children)
     }
 
@@ -628,7 +719,14 @@ impl Renderable for BottomPane {
         if self.status.is_none() && !self.unified_exec_footer.is_empty() {
             children.push(&self.unified_exec_footer);
         }
-        children.extend_from_slice(&[&self.pending_thread_approvals, &self.composer]);
+        let pending_cells = PendingCellList {
+            texts: &self.pending_cell_texts,
+        };
+        if pending_cells.desired_height(area.width) > 0 {
+            children.push(&pending_cells);
+        }
+        children.push(&self.pending_thread_approvals);
+        children.push(&self.composer);
         self.child_cursor_pos(area, &children)
     }
 }

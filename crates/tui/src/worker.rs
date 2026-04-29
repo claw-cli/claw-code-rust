@@ -1133,11 +1133,15 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
         {
             let result_item = &items[result_index];
             consumed_result_indexes.insert(result_index, ());
-            transcript.push(if result_item.kind == SessionHistoryItemKind::Error {
+            let mut ti = if result_item.kind == SessionHistoryItemKind::Error {
                 TranscriptItem::tool_error(item.title.clone(), result_item.body.clone())
             } else {
                 TranscriptItem::restored_tool_result(item.title.clone(), result_item.body.clone())
-            });
+            };
+            if let Some(duration_ms) = result_item.duration_ms {
+                ti = ti.with_duration(duration_ms);
+            }
+            transcript.push(ti);
             index += 1;
             continue;
         }
@@ -1155,7 +1159,7 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
             SessionHistoryItemKind::ToolResult => TranscriptItemKind::ToolResult,
             SessionHistoryItemKind::Error => TranscriptItemKind::Error,
         };
-        let transcript_item = match item.kind {
+        let mut transcript_item = match item.kind {
             SessionHistoryItemKind::ToolCall => TranscriptItem::tool_call(item.title.clone()),
             SessionHistoryItemKind::ToolResult => {
                 TranscriptItem::restored_tool_result(item.title.clone(), item.body.clone())
@@ -1169,6 +1173,9 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
                 TranscriptItem::new(kind, item.title.clone(), item.body.clone())
             }
         };
+        if let Some(duration_ms) = item.duration_ms {
+            transcript_item = transcript_item.with_duration(duration_ms);
+        }
         transcript.push(transcript_item);
         index += 1;
     }
@@ -1520,12 +1527,14 @@ mod tests {
                 kind: SessionHistoryItemKind::ToolCall,
                 title: "Ran powershell -Command \"Get-Date\"".to_string(),
                 body: String::new(),
+                duration_ms: None,
             },
             SessionHistoryItem {
                 tool_call_id: Some("call-1".to_string()),
                 kind: SessionHistoryItemKind::ToolResult,
                 title: "Tool output".to_string(),
                 body: "2026-04-09".to_string(),
+                duration_ms: None,
             },
         ];
 
@@ -1546,24 +1555,28 @@ mod tests {
                 kind: SessionHistoryItemKind::ToolCall,
                 title: "Ran read a".to_string(),
                 body: String::new(),
+                duration_ms: None,
             },
             SessionHistoryItem {
                 tool_call_id: Some("call-b".to_string()),
                 kind: SessionHistoryItemKind::ToolCall,
                 title: "Ran read b".to_string(),
                 body: String::new(),
+                duration_ms: None,
             },
             SessionHistoryItem {
                 tool_call_id: Some("call-b".to_string()),
                 kind: SessionHistoryItemKind::ToolResult,
                 title: "Tool output".to_string(),
                 body: "B".to_string(),
+                duration_ms: None,
             },
             SessionHistoryItem {
                 tool_call_id: Some("call-a".to_string()),
                 kind: SessionHistoryItemKind::ToolResult,
                 title: "Tool output".to_string(),
                 body: "A".to_string(),
+                duration_ms: None,
             },
         ];
 
@@ -1583,6 +1596,7 @@ mod tests {
             kind: SessionHistoryItemKind::Reasoning,
             title: String::new(),
             body: "thinking aloud".to_string(),
+            duration_ms: None,
         }];
 
         assert_eq!(
