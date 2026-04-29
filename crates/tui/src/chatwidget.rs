@@ -1497,17 +1497,21 @@ impl ChatWidget {
     }
 
     fn commit_active_streams(&mut self, status: DotStatus) {
-        if !self.active_reasoning_text.trim().is_empty() {
-            let reasoning_text = std::mem::take(&mut self.active_reasoning_text);
+        // Take the text first so any buffered delta events that arrive after
+        // this call will not re-create the active reasoning/assistant cells
+        // with stale content.
+        let reasoning_text = std::mem::take(&mut self.active_reasoning_text);
+        let assistant_text = std::mem::take(&mut self.active_assistant_text);
+        self.active_reasoning_cell = None;
+        self.active_assistant_cell = None;
+        self.stream_controller = None;
+
+        if !reasoning_text.trim().is_empty() {
             self.add_markdown_history_with_status("Reasoning", &reasoning_text, status);
         }
-        self.active_reasoning_cell = None;
-        self.finalize_assistant_stream();
-        if !self.active_assistant_text.trim().is_empty() {
-            let text = std::mem::take(&mut self.active_assistant_text);
-            self.add_markdown_history_with_status("Assistant", &text, status);
+        if !assistant_text.trim().is_empty() {
+            self.add_markdown_history_with_status("Assistant", &assistant_text, status);
         }
-        self.active_assistant_cell = None;
     }
 
     fn push_assistant_stream_delta(&mut self, text: &str) {
