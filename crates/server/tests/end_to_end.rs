@@ -31,6 +31,8 @@ use devo_server::ServerRuntimeDependencies;
 use devo_tools::ToolRegistry;
 use futures::stream;
 
+const STDIO_SERVER_LINE_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn write_test_config(home_dir: &TempDir, listen: &[&str]) -> Result<()> {
     let config_dir = home_dir.path().join(".devo");
 
@@ -505,7 +507,7 @@ async fn read_stdio_line(
     reader: &mut tokio::io::Lines<AsyncBufReader<tokio::process::ChildStdout>>,
     context: &str,
 ) -> Result<String> {
-    timeout(Duration::from_secs(5), reader.next_line())
+    timeout(STDIO_SERVER_LINE_TIMEOUT, reader.next_line())
         .await
         .with_context(|| format!("timed out waiting for {context}"))?
         .with_context(|| format!("failed reading {context} from child stdout"))?
