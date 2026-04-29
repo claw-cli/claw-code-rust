@@ -691,10 +691,6 @@ impl ChatWidget {
                 self.active_reasoning_cell = None;
                 self.stream_controller = None;
                 self.bottom_pane.set_task_running(true);
-                // If there are queued cells, one has been consumed by this new turn.
-                if self.queued_count > 0 {
-                    self.unqueue_oldest_pending();
-                }
             }
             WorkerEvent::TextDelta(text) => {
                 self.push_assistant_stream_delta(&text);
