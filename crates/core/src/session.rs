@@ -60,6 +60,10 @@ pub struct SessionState {
     /// Thread-safe inbox for pending inputs pushed from server handlers
     /// while the query loop is running.
     pub pending_user_prompts: Arc<Mutex<VecDeque<PendingInputItem>>>,
+    /// Thread-safe inbox for /btw steer inputs pushed while the query loop
+    /// is running. These are drained into the CURRENT turn's pending_input
+    /// at each loop iteration and are NOT carried over to the next turn.
+    pub steer_input_queue: Arc<Mutex<VecDeque<PendingInputItem>>>,
     /// Turn-scoped state (Some while a turn is active).
     pub(crate) turn_state: Option<TurnState>,
     /// Items queued for next turn when current turn ends with unconsumed input.
@@ -84,6 +88,7 @@ impl SessionState {
             prompt_token_estimate: 0,
             last_input_tokens: 0,
             pending_user_prompts: Arc::new(Mutex::new(VecDeque::new())),
+            steer_input_queue: Arc::new(Mutex::new(VecDeque::new())),
             turn_state: None,
             idle_pending_input: VecDeque::new(),
         }
@@ -152,13 +157,28 @@ impl SessionState {
             // Unconsumed pending input goes back to idle queue.
             self.idle_pending_input.extend(turn.pending_input);
         }
+        // /btw steer inputs are scoped to the current turn only; discard any
+        // that arrived too late to be consumed.
+        self.steer_input_queue
+            .lock()
+            .expect("steer input queue mutex should not be poisoned")
+            .clear();
     }
 
-    /// Merge turn-scoped pending input with the cross-thread inbox.
+    pub fn drain_steer_input_queue(&self) -> Vec<PendingInputItem> {
+        let mut guard = self
+            .steer_input_queue
+            .lock()
+            .expect("steer input queue mutex should not be poisoned");
+        guard.drain(..).collect()
+    }
+
+    /// Merge turn-scoped pending input with both cross-thread inboxes.
+    /// Order: steer inbox → turn-state pending → next-turn queue
     pub fn take_turn_pending_input(&mut self) -> Vec<PendingInputItem> {
-        let mut result = Vec::new();
+        let mut result = self.drain_steer_input_queue();
         if let Some(turn) = self.turn_state.as_mut() {
-            result = turn.take_pending_input();
+            result.extend(turn.take_pending_input());
         }
         result.extend(self.drain_pending_user_prompts());
         result

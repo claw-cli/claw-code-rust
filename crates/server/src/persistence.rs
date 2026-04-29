@@ -482,6 +482,9 @@ impl ReplayState {
             steering_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
+            steer_input_queue: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             active_task: None,
             next_item_seq: self.next_item_seq.max(1),
             first_user_input: None,

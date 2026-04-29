@@ -379,6 +379,7 @@ impl ServerRuntime {
         }
         let core_session = self.deps.new_session_state(session_id, params.cwd.clone());
         let steering_queue = Arc::clone(&core_session.pending_user_prompts);
+        let steer_input_queue = Arc::clone(&core_session.steer_input_queue);
         self.sessions.lock().await.insert(
             session_id,
             RuntimeSession {
@@ -392,6 +393,7 @@ impl ServerRuntime {
                 persisted_turn_items: Vec::new(),
                 latest_compaction_snapshot: None,
                 steering_queue,
+                steer_input_queue,
                 active_task: None,
                 next_item_seq: 1,
                 first_user_input: None,
@@ -692,6 +694,7 @@ impl ServerRuntime {
         drop(source_core_session);
         drop(source);
         let steering_queue = Arc::clone(&core_session.pending_user_prompts);
+        let steer_input_queue = Arc::clone(&core_session.steer_input_queue);
         self.sessions.lock().await.insert(
             forked_id,
             RuntimeSession {
@@ -705,6 +708,7 @@ impl ServerRuntime {
                 persisted_turn_items,
                 latest_compaction_snapshot,
                 steering_queue,
+                steer_input_queue,
                 active_task: None,
                 next_item_seq: loaded_item_count + 1,
                 first_user_input: None,
@@ -1595,7 +1599,7 @@ impl ServerRuntime {
             (
                 turn_id,
                 session.summary.cwd.clone(),
-                Arc::clone(&session.steering_queue),
+                Arc::clone(&session.steer_input_queue),
             )
         };
         let prompt_text = match self
