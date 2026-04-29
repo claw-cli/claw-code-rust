@@ -32,6 +32,7 @@ pub struct SessionMetadata {
     pub thinking: Option<String>,
     pub total_input_tokens: usize,
     pub total_output_tokens: usize,
+    pub prompt_token_estimate: usize,
     pub status: SessionRuntimeStatus,
 }
 
@@ -156,6 +157,7 @@ mod tests {
             thinking: Some("medium".to_string()),
             total_input_tokens: 12,
             total_output_tokens: 34,
+            prompt_token_estimate: 21,
             status: SessionRuntimeStatus::Idle,
         };
 

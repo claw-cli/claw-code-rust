@@ -222,6 +222,7 @@ pub(crate) struct ChatWidget {
     turn_count: usize,
     total_input_tokens: usize,
     total_output_tokens: usize,
+    prompt_token_estimate: usize,
     busy: bool,
 }
 
@@ -330,7 +331,7 @@ impl ChatWidget {
         let model = self.session.model.as_ref()?;
         let total = model.context_window as usize;
         let usable = total.saturating_mul(model.effective_context_window_percent() as usize) / 100;
-        let used = self.total_input_tokens.min(usable);
+        let used = self.prompt_token_estimate.min(usable);
         Some((used, usable, total))
     }
 
@@ -526,6 +527,7 @@ impl ChatWidget {
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            prompt_token_estimate: 0,
             busy: false,
         };
 
@@ -771,6 +773,7 @@ impl ChatWidget {
             } => {
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.prompt_token_estimate = total_input_tokens;
                 self.frame_requester.schedule_frame();
             }
             WorkerEvent::TurnFinished {
@@ -778,6 +781,7 @@ impl ChatWidget {
                 turn_count,
                 total_input_tokens,
                 total_output_tokens,
+                prompt_token_estimate,
             } => {
                 self.commit_active_streams(DotStatus::Completed);
                 self.active_tool_calls.clear();
@@ -786,6 +790,7 @@ impl ChatWidget {
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.prompt_token_estimate = prompt_token_estimate;
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Ready");
             }
@@ -794,6 +799,7 @@ impl ChatWidget {
                 turn_count,
                 total_input_tokens,
                 total_output_tokens,
+                prompt_token_estimate,
             } => {
                 self.resume_browser_loading = false;
                 self.commit_active_streams(DotStatus::Failed);
@@ -803,6 +809,7 @@ impl ChatWidget {
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.prompt_token_estimate = prompt_token_estimate;
                 self.add_to_history(history_cell::new_error_event(message));
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Query failed; see error above");
@@ -863,6 +870,7 @@ impl ChatWidget {
                 self.turn_count = 0;
                 self.total_input_tokens = 0;
                 self.total_output_tokens = 0;
+                self.prompt_token_estimate = 0;
                 self.push_session_header(
                     /*is_first_run*/ false, /*startup_tooltip_override*/ None,
                 );
@@ -876,6 +884,7 @@ impl ChatWidget {
                 thinking,
                 total_input_tokens,
                 total_output_tokens,
+                prompt_token_estimate,
                 history_items,
                 loaded_item_count,
             } => {
@@ -894,6 +903,7 @@ impl ChatWidget {
                 self.stream_controller = None;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.prompt_token_estimate = prompt_token_estimate;
                 self.rebuild_restored_session_history(
                     history_items,
                     loaded_item_count,
@@ -917,11 +927,13 @@ impl ChatWidget {
             WorkerEvent::SessionCompacted {
                 total_input_tokens,
                 total_output_tokens,
+                prompt_token_estimate,
             } => {
                 self.busy = false;
                 self.bottom_pane.set_task_running(false);
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.prompt_token_estimate = prompt_token_estimate;
                 self.add_to_history(history_cell::new_info_event(
                     "Session compaction done".to_string(),
                     None,

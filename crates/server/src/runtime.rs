@@ -30,7 +30,6 @@ use devo_core::history::compaction::CompactAction;
 use devo_core::history::compaction::CompactionConfig;
 use devo_core::history::compaction::CompactionKind;
 use devo_core::history::compaction::compact_history;
-use devo_core::history::normalize;
 use devo_core::history::summarizer::DefaultHistorySummarizer;
 use devo_core::message_to_response_items;
 use devo_core::query;
@@ -348,6 +347,7 @@ impl ServerRuntime {
             thinking: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            prompt_token_estimate: 0,
             status: SessionRuntimeStatus::Idle,
         };
         if let Some(record) = &record
@@ -372,6 +372,7 @@ impl ServerRuntime {
                 loaded_item_count: 0,
                 history_items: Vec::new(),
                 persisted_turn_items: Vec::new(),
+                latest_compaction_snapshot: None,
                 steering_queue,
                 active_task: None,
                 next_item_seq: 1,
@@ -650,10 +651,12 @@ impl ServerRuntime {
             thinking: source.summary.thinking.clone(),
             total_input_tokens: source_core_session.total_input_tokens,
             total_output_tokens: source_core_session.total_output_tokens,
+            prompt_token_estimate: source_core_session.prompt_token_estimate,
             status: SessionRuntimeStatus::Idle,
         };
         let mut core_session = self.deps.new_session_state(forked_id, fork_cwd);
         core_session.messages = source_core_session.messages.clone();
+        core_session.prompt_messages = source_core_session.prompt_messages.clone();
         core_session.session_context = source_core_session.session_context.clone();
         core_session.latest_turn_context = source_core_session.latest_turn_context.clone();
         core_session.turn_count = source_core_session.turn_count;
@@ -665,6 +668,7 @@ impl ServerRuntime {
         let latest_turn = source.latest_turn.clone();
         let loaded_item_count = source.loaded_item_count;
         let history_items = source.history_items.clone();
+        let latest_compaction_snapshot = source.latest_compaction_snapshot.clone();
         let persisted_turn_items = source.persisted_turn_items.clone();
         drop(source_core_session);
         drop(source);
@@ -680,6 +684,7 @@ impl ServerRuntime {
                 loaded_item_count,
                 history_items,
                 persisted_turn_items,
+                latest_compaction_snapshot,
                 steering_queue,
                 active_task: None,
                 next_item_seq: loaded_item_count + 1,
@@ -862,11 +867,8 @@ impl ServerRuntime {
         match result {
             Ok(CompactAction::Replaced(compacted_items)) => {
                 let mut runtime_session = session_arc.lock().await;
-                let normalized_persisted_items = Self::normalized_persisted_response_items(
-                    &runtime_session.persisted_turn_items,
-                );
                 let preserved_item_ids = Self::preserved_item_ids_from_compacted(
-                    &normalized_persisted_items,
+                    &runtime_session.persisted_turn_items,
                     &compacted_items,
                 );
                 let new_messages: Vec<Message> = compacted_items
@@ -879,12 +881,20 @@ impl ServerRuntime {
 
                 {
                     let mut core_session = runtime_session.core_session.lock().await;
-                    core_session.messages = new_messages;
+                    core_session.set_prompt_messages(new_messages);
                     let compacted_total_input_tokens = core_session.total_input_tokens;
                     let compacted_total_output_tokens = core_session.total_output_tokens;
+                    let compacted_prompt_token_estimate = core_session
+                        .prompt_source_messages()
+                        .iter()
+                        .map(|message| serde_json::to_string(message).map_or(0, |json| json.len()))
+                        .sum::<usize>()
+                        .div_ceil(4);
+                    core_session.prompt_token_estimate = compacted_prompt_token_estimate;
                     drop(core_session);
                     runtime_session.summary.total_input_tokens = compacted_total_input_tokens;
                     runtime_session.summary.total_output_tokens = compacted_total_output_tokens;
+                    runtime_session.summary.prompt_token_estimate = compacted_prompt_token_estimate;
                 }
 
                 if let Some(turn_id) = runtime_session
@@ -932,32 +942,20 @@ impl ServerRuntime {
                     if let Some(record) = runtime_session.record.clone() {
                         let summary_turn_item =
                             Self::summary_turn_item_from_compacted(&compacted_items);
-                        if let Some(history_item) = history_item_from_turn_item(&summary_turn_item)
-                        {
-                            let preserved_history_items = Self::filter_history_items_by_ids(
-                                &runtime_session,
-                                &preserved_item_ids,
-                            );
-                            let mut rebuilt_history_items =
-                                Vec::with_capacity(preserved_history_items.len() + 1);
-                            rebuilt_history_items.push(history_item);
-                            rebuilt_history_items.extend(preserved_history_items);
-                            runtime_session.history_items = rebuilt_history_items;
-                        }
-
-                        let preserved_turn_items = runtime_session
-                            .persisted_turn_items
-                            .iter()
-                            .filter(|item| preserved_item_ids.contains(&item.item_id))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        runtime_session.persisted_turn_items =
-                            std::iter::once(crate::execution::PersistedTurnItem {
+                        runtime_session.latest_compaction_snapshot =
+                            Some(devo_core::CompactionSnapshotLine {
+                                timestamp: Utc::now(),
+                                session_id,
+                                turn_id,
+                                summary_item_id: item_id,
+                                preserved_item_ids: preserved_item_ids.clone(),
+                            });
+                        runtime_session.persisted_turn_items.push(
+                            crate::execution::PersistedTurnItem {
                                 item_id,
                                 turn_item: summary_turn_item.clone(),
-                            })
-                            .chain(preserved_turn_items)
-                            .collect();
+                            },
+                        );
 
                         let item_record = crate::persistence::build_item_record(
                             session_id,
@@ -977,13 +975,10 @@ impl ServerRuntime {
                         }
                         if let Err(error) = self.rollout_store.append_compaction_snapshot(
                             &record,
-                            devo_core::CompactionSnapshotLine {
-                                timestamp: Utc::now(),
-                                session_id,
-                                turn_id,
-                                summary_item_id: item_id,
-                                preserved_item_ids: preserved_item_ids.clone(),
-                            },
+                            runtime_session
+                                .latest_compaction_snapshot
+                                .clone()
+                                .expect("compaction snapshot should be set"),
                         ) {
                             tracing::warn!(
                                 session_id = %session_id,
@@ -1023,81 +1018,58 @@ impl ServerRuntime {
         }
     }
 
-    fn normalized_persisted_response_items(
-        persisted_turn_items: &[crate::execution::PersistedTurnItem],
-    ) -> Vec<(ItemId, ResponseItem)> {
-        let mut items = persisted_turn_items
-            .iter()
-            .filter_map(Self::persisted_turn_item_to_response_item)
-            .collect::<Vec<_>>();
-        items.retain(|(_, item)| !item.is_reason());
-        let mut response_items = items
-            .iter()
-            .map(|(_, item)| item.clone())
-            .collect::<Vec<_>>();
-        normalize::pair_tool_call_items(&mut response_items);
-        let mut paired = Vec::with_capacity(response_items.len());
-        let mut source_iter = items.into_iter();
-        for normalized_item in response_items {
-            while let Some((item_id, source_item)) = source_iter.next() {
-                if source_item == normalized_item {
-                    paired.push((item_id, normalized_item.clone()));
-                    break;
-                }
-            }
-        }
-        paired
-    }
-
-    fn persisted_turn_item_to_response_item(
-        item: &crate::execution::PersistedTurnItem,
-    ) -> Option<(ItemId, ResponseItem)> {
-        let response_item = match &item.turn_item {
-            TurnItem::UserMessage(TextItem { text }) | TurnItem::SteerInput(TextItem { text }) => {
-                ResponseItem::Message(Message::user(text.clone()))
-            }
-            TurnItem::AgentMessage(TextItem { text })
-            | TurnItem::Plan(TextItem { text })
-            | TurnItem::WebSearch(TextItem { text })
-            | TurnItem::ImageGeneration(TextItem { text })
-            | TurnItem::ContextCompaction(TextItem { text })
-            | TurnItem::HookPrompt(TextItem { text }) => {
-                ResponseItem::Message(Message::assistant_text(text.clone()))
-            }
-            TurnItem::Reasoning(TextItem { text }) => ResponseItem::Reason { text: text.clone() },
-            TurnItem::ToolCall(ToolCallItem {
-                tool_call_id,
-                tool_name,
-                input,
-            }) => ResponseItem::ToolCall {
-                id: tool_call_id.clone(),
-                name: tool_name.clone(),
-                input: input.clone(),
-            },
-            TurnItem::ToolResult(ToolResultItem {
-                tool_call_id,
-                output,
-                is_error,
-                ..
-            }) => ResponseItem::ToolCallOutput {
-                tool_use_id: tool_call_id.clone(),
-                content: match output {
-                    serde_json::Value::String(text) => text.clone(),
-                    other => other.to_string(),
-                },
-                is_error: *is_error,
-            },
-            TurnItem::ToolProgress(_)
-            | TurnItem::ApprovalRequest(_)
-            | TurnItem::ApprovalDecision(_) => return None,
-        };
-        Some((item.item_id, response_item))
-    }
-
     fn preserved_item_ids_from_compacted(
-        normalized_persisted_items: &[(ItemId, ResponseItem)],
+        persisted_turn_items: &[crate::execution::PersistedTurnItem],
         compacted_items: &[ResponseItem],
     ) -> Vec<ItemId> {
+        let normalized_persisted_items = persisted_turn_items
+            .iter()
+            .filter_map(|item| {
+                let response_item = match &item.turn_item {
+                    TurnItem::UserMessage(TextItem { text })
+                    | TurnItem::SteerInput(TextItem { text }) => {
+                        ResponseItem::Message(Message::user(text.clone()))
+                    }
+                    TurnItem::AgentMessage(TextItem { text })
+                    | TurnItem::Plan(TextItem { text })
+                    | TurnItem::WebSearch(TextItem { text })
+                    | TurnItem::ImageGeneration(TextItem { text })
+                    | TurnItem::ContextCompaction(TextItem { text })
+                    | TurnItem::HookPrompt(TextItem { text }) => {
+                        ResponseItem::Message(Message::assistant_text(text.clone()))
+                    }
+                    TurnItem::Reasoning(TextItem { text }) => {
+                        ResponseItem::Reason { text: text.clone() }
+                    }
+                    TurnItem::ToolCall(ToolCallItem {
+                        tool_call_id,
+                        tool_name,
+                        input,
+                    }) => ResponseItem::ToolCall {
+                        id: tool_call_id.clone(),
+                        name: tool_name.clone(),
+                        input: input.clone(),
+                    },
+                    TurnItem::ToolResult(ToolResultItem {
+                        tool_call_id,
+                        output,
+                        is_error,
+                        ..
+                    }) => ResponseItem::ToolCallOutput {
+                        tool_use_id: tool_call_id.clone(),
+                        content: match output {
+                            serde_json::Value::String(text) => text.clone(),
+                            other => other.to_string(),
+                        },
+                        is_error: *is_error,
+                    },
+                    TurnItem::ToolProgress(_)
+                    | TurnItem::ApprovalRequest(_)
+                    | TurnItem::ApprovalDecision(_) => return None,
+                };
+                (!response_item.is_reason()).then_some((item.item_id, response_item))
+            })
+            .collect::<Vec<_>>();
         let preserved = compacted_items.get(1..).unwrap_or(&[]);
         if preserved.is_empty() {
             return Vec::new();
@@ -1132,26 +1104,6 @@ impl ServerRuntime {
             })
             .unwrap_or_default();
         TurnItem::ContextCompaction(TextItem { text: summary_text })
-    }
-
-    fn filter_history_items_by_ids(
-        runtime_session: &crate::execution::RuntimeSession,
-        preserved_item_ids: &[ItemId],
-    ) -> Vec<crate::SessionHistoryItem> {
-        let preserved_set = preserved_item_ids
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        runtime_session
-            .persisted_turn_items
-            .iter()
-            .zip(runtime_session.history_items.iter())
-            .filter_map(|(item, history_item)| {
-                preserved_set
-                    .contains(&item.item_id)
-                    .then_some(history_item.clone())
-            })
-            .collect()
     }
 
     async fn handle_turn_start(
@@ -1956,6 +1908,7 @@ impl ServerRuntime {
             first_assistant_reply,
             session_total_input_tokens,
             session_total_output_tokens,
+            session_prompt_token_estimate,
         ) = {
             let core_session = {
                 let session = session_arc.lock().await;
@@ -1997,6 +1950,7 @@ impl ServerRuntime {
                 first_assistant_reply,
                 core_session.total_input_tokens,
                 core_session.total_output_tokens,
+                core_session.prompt_token_estimate,
             )
         };
         drop(event_tx);
@@ -2020,6 +1974,7 @@ impl ServerRuntime {
             session.summary.updated_at = Utc::now();
             session.summary.total_input_tokens = session_total_input_tokens;
             session.summary.total_output_tokens = session_total_output_tokens;
+            session.summary.prompt_token_estimate = session_prompt_token_estimate;
             final_turn
         };
         let (record, session_context, turn_context) = {

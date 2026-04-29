@@ -430,6 +430,7 @@ fn streamed_lines_stay_in_live_viewport_until_turn_finishes() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        prompt_token_estimate: 0,
     });
 
     let committed_after_finish = widget.drain_scrollback_lines(80);
@@ -460,6 +461,7 @@ fn committed_history_drains_to_scrollback_lines() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        prompt_token_estimate: 0,
     });
 
     let committed_lines = trim_trailing_blank_scrollback_lines(widget.drain_scrollback_lines(80));
@@ -547,6 +549,7 @@ fn session_switch_restores_header_and_double_blank_line_before_user_input() {
         thinking: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        prompt_token_estimate: 3,
         history_items: vec![
             crate::events::TranscriptItem::new(
                 crate::events::TranscriptItemKind::User,
@@ -606,6 +609,7 @@ fn turn_finished_does_not_add_completion_status_line_to_history() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        prompt_token_estimate: 0,
     });
 
     let committed_lines = widget.drain_scrollback_lines(80);
@@ -707,6 +711,7 @@ fn committed_assistant_markdown_does_not_double_wrap() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        prompt_token_estimate: 0,
     });
 
     let committed = widget
@@ -756,6 +761,7 @@ fn reasoning_text_commits_to_history_when_turn_finishes() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        prompt_token_estimate: 0,
     });
 
     let scrollback = widget.drain_scrollback_lines(80);
@@ -780,6 +786,7 @@ fn restored_reasoning_text_is_visible_in_transcript() {
         thinking: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        prompt_token_estimate: 0,
         history_items: vec![crate::events::TranscriptItem::new(
             crate::events::TranscriptItemKind::Reasoning,
             "",
@@ -924,6 +931,7 @@ fn session_switch_updates_session_identity_projection() {
         thinking: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        prompt_token_estimate: 3,
         history_items: Vec::new(),
         loaded_item_count: 0,
     });
@@ -957,6 +965,7 @@ fn new_session_prepared_resets_session_identity_projection() {
         thinking: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        prompt_token_estimate: 3,
         history_items: Vec::new(),
         loaded_item_count: 0,
     });

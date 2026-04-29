@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -17,6 +18,11 @@ use devo_server::{ClientTransportKind, ServerRuntime, ServerRuntimeDependencies}
 use devo_tools::ToolRegistry;
 
 struct SingleReplyProvider;
+
+#[derive(Default)]
+struct CapturingProvider {
+    requests: Mutex<Vec<ModelRequest>>,
+}
 
 #[async_trait]
 impl ModelProviderSDK for SingleReplyProvider {
@@ -53,6 +59,46 @@ impl ModelProviderSDK for SingleReplyProvider {
 
     fn name(&self) -> &str {
         "single-reply-test-provider"
+    }
+}
+
+#[async_trait]
+impl ModelProviderSDK for CapturingProvider {
+    async fn completion(&self, request: ModelRequest) -> Result<ModelResponse> {
+        self.requests.lock().expect("lock requests").push(request);
+        Ok(ModelResponse {
+            id: "title-1".into(),
+            content: vec![ResponseContent::Text("Generated rollout title".to_string())],
+            stop_reason: Some(StopReason::EndTurn),
+            usage: Usage::default(),
+            metadata: ResponseMetadata::default(),
+        })
+    }
+
+    async fn completion_stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
+        self.requests.lock().expect("lock requests").push(request);
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamEvent::TextDelta {
+                index: 0,
+                text: "Captured request reply.".into(),
+            }),
+            Ok(StreamEvent::MessageDone {
+                response: ModelResponse {
+                    id: "resp-capture".into(),
+                    content: vec![ResponseContent::Text("Captured request reply.".into())],
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage: Usage::default(),
+                    metadata: ResponseMetadata::default(),
+                },
+            }),
+        ])))
+    }
+
+    fn name(&self) -> &str {
+        "capturing-provider"
     }
 }
 
@@ -651,7 +697,7 @@ async fn session_compact_runs_asynchronously_and_emits_lifecycle_events() -> Res
 }
 
 #[tokio::test]
-async fn compacted_session_replays_as_compacted_after_restart() -> Result<()> {
+async fn compacted_session_resume_keeps_full_transcript_after_restart() -> Result<()> {
     let data_root = TempDir::new()?;
     let runtime = build_runtime(data_root.path())?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
@@ -741,20 +787,154 @@ async fn compacted_session_replays_as_compacted_after_restart() -> Result<()> {
     .result;
 
     assert!(
+        resume_result.history_items.len() >= 6,
+        "expected full transcript to survive compaction, got {:?}",
+        resume_result.history_items
+    );
+    assert!(
         resume_result
             .history_items
             .iter()
-            .any(|item| item.body.contains("<compaction_summary>")),
-        "expected resumed history to contain compacted summary"
+            .all(|item| !item.body.contains("<compaction_summary>")),
+        "compaction summary must not appear in user-visible transcript"
+    );
+    assert!(
+        resume_result
+            .history_items
+            .iter()
+            .any(|item| item.body.contains("Hello from persistence test.")),
+        "expected assistant transcript entries to remain visible"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn compacted_session_next_query_uses_compaction_summary_after_restart() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let runtime = build_runtime(data_root.path())?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+
+    let start_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 81,
+                "method": "session/start",
+                "params": {
+                    "cwd": data_root.path(),
+                    "ephemeral": false,
+                    "title": "Prompt snapshot session",
+                    "model": "test-model"
+                }
+            }),
+        )
+        .await
+        .context("session/start response")?;
+    let session_id = serde_json::from_value::<
+        devo_server::SuccessResponse<devo_server::SessionStartResult>,
+    >(start_response)?
+    .result
+    .session
+    .session_id;
+
+    for request_id in 0..3 {
+        let large_prompt = "x".repeat(30_000);
+        let _ = runtime
+            .handle_incoming(
+                connection_id,
+                serde_json::json!({
+                    "id": 82 + request_id,
+                    "method": "turn/start",
+                    "params": {
+                        "session_id": session_id,
+                        "input": [{ "type": "text", "text": large_prompt }],
+                        "model": null,
+                        "sandbox": null,
+                        "approval_policy": null,
+                        "cwd": null
+                    }
+                }),
+            )
+            .await
+            .context("turn/start response")?;
+        wait_for_turn_completed(&mut notifications_rx).await?;
+    }
+
+    let _ = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 90,
+                "method": "session/compact",
+                "params": {
+                    "session_id": session_id
+                }
+            }),
+        )
+        .await
+        .context("session/compact response")?;
+    wait_for_notification_method(&mut notifications_rx, "session/compaction/completed").await?;
+
+    let capturing_provider = Arc::new(CapturingProvider::default());
+    let rebuilt_runtime =
+        build_runtime_with_provider(data_root.path(), capturing_provider.clone())?;
+    rebuilt_runtime.load_persisted_sessions().await?;
+    let (rebuilt_connection_id, mut rebuilt_notifications_rx) =
+        initialize_connection(&rebuilt_runtime).await?;
+
+    let _ = rebuilt_runtime
+        .handle_incoming(
+            rebuilt_connection_id,
+            serde_json::json!({
+                "id": 91,
+                "method": "turn/start",
+                "params": {
+                    "session_id": session_id,
+                    "input": [{ "type": "text", "text": "go on" }],
+                    "model": null,
+                    "sandbox": null,
+                    "approval_policy": null,
+                    "cwd": null
+                }
+            }),
+        )
+        .await
+        .context("turn/start response after restart")?;
+    wait_for_turn_completed(&mut rebuilt_notifications_rx).await?;
+
+    let requests = capturing_provider.requests.lock().expect("lock requests");
+    let request = requests
+        .last()
+        .context("expected captured model request after restart")?;
+
+    assert!(
+        request.messages.iter().any(|message| {
+            message.content.iter().any(|content| match content {
+                devo_protocol::RequestContent::Text { text }
+                | devo_protocol::RequestContent::Reasoning { text } => {
+                    text.contains("<compaction_summary>")
+                }
+                devo_protocol::RequestContent::ToolUse { .. }
+                | devo_protocol::RequestContent::ToolResult { .. } => false,
+            })
+        }),
+        "expected prompt request to include compaction summary after restart"
     );
     Ok(())
 }
 
 fn build_runtime(data_root: &std::path::Path) -> Result<Arc<ServerRuntime>> {
+    build_runtime_with_provider(data_root, Arc::new(SingleReplyProvider))
+}
+
+fn build_runtime_with_provider(
+    data_root: &std::path::Path,
+    provider: Arc<dyn ModelProviderSDK>,
+) -> Result<Arc<ServerRuntime>> {
     Ok(ServerRuntime::new(
         data_root.to_path_buf(),
         ServerRuntimeDependencies::new(
-            Arc::new(SingleReplyProvider),
+            provider,
             Arc::new(ToolRegistry::new()),
             "test-model".to_string(),
             Arc::new(PresetModelCatalog::default()),

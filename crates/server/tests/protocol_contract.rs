@@ -311,6 +311,7 @@ fn session_title_updated_event_serializes_expected_kind() {
             thinking: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            prompt_token_estimate: 0,
             status: SessionRuntimeStatus::Idle,
         },
     });
@@ -333,6 +334,7 @@ fn session_compaction_events_serialize_expected_kinds() {
         thinking: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        prompt_token_estimate: 0,
         status: SessionRuntimeStatus::Idle,
     };
 

@@ -397,6 +397,7 @@ fn handle_worker_event(
         WorkerEvent::SessionCompacted {
             total_input_tokens: next_total_input_tokens,
             total_output_tokens: next_total_output_tokens,
+            prompt_token_estimate: _,
         } => {
             loop_state.busy = false;
             loop_state.total_input_tokens = *next_total_input_tokens;

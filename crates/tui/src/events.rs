@@ -88,6 +88,8 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated in the session.
         total_output_tokens: usize,
+        /// Estimated prompt tokens for the just-completed request.
+        prompt_token_estimate: usize,
     },
     /// The current turn failed.
     TurnFailed {
@@ -99,6 +101,8 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated in the session.
         total_output_tokens: usize,
+        /// Estimated prompt tokens for the last attempted request.
+        prompt_token_estimate: usize,
     },
     /// Provider validation succeeded during onboarding.
     ProviderValidationSucceeded {
@@ -145,6 +149,8 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated for the resumed session.
         total_output_tokens: usize,
+        /// Estimated prompt tokens currently visible to the model.
+        prompt_token_estimate: usize,
         /// Replay-friendly transcript items loaded from the resumed session.
         history_items: Vec<TranscriptItem>,
         /// Number of persisted items loaded for the resumed session.
@@ -165,6 +171,8 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated in the compacted session.
         total_output_tokens: usize,
+        /// Estimated prompt tokens currently visible to the model.
+        prompt_token_estimate: usize,
     },
     /// The active session compaction request failed.
     SessionCompactionFailed {

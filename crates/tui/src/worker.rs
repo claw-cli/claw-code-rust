@@ -301,6 +301,7 @@ async fn run_worker(
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            prompt_token_estimate: 0,
         });
     }
 }
@@ -364,6 +365,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    prompt_token_estimate: total_input_tokens,
                                 });
                             }
                         }
@@ -468,6 +470,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    prompt_token_estimate: total_input_tokens,
                                 });
                             }
                             Err(_) => {
@@ -476,6 +479,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    prompt_token_estimate: total_input_tokens,
                                 });
                             }
                         }
@@ -499,6 +503,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    prompt_token_estimate: total_input_tokens,
                                 });
                             }
                             Err(_) => {
@@ -507,6 +512,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    prompt_token_estimate: total_input_tokens,
                                 });
                             }
                         }
@@ -518,6 +524,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                prompt_token_estimate: total_input_tokens,
                             });
                             continue;
                         };
@@ -527,6 +534,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                prompt_token_estimate: total_input_tokens,
                             });
                             continue;
                         }
@@ -551,6 +559,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    prompt_token_estimate: total_input_tokens,
                                 });
                             }
                         }
@@ -586,6 +595,7 @@ async fn run_worker_inner(
                                     thinking: result.session.thinking.clone(),
                                     total_input_tokens: result.session.total_input_tokens,
                                     total_output_tokens: result.session.total_output_tokens,
+                                    prompt_token_estimate: result.session.prompt_token_estimate,
                                     history_items: project_history_items(&result.history_items),
                                     loaded_item_count: result.loaded_item_count,
                                 });
@@ -604,6 +614,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    prompt_token_estimate: total_input_tokens,
                                 });
                             }
                         }
@@ -615,6 +626,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                prompt_token_estimate: total_input_tokens,
                             });
                             continue;
                         };
@@ -640,6 +652,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    prompt_token_estimate: total_input_tokens,
                                 });
                             }
                         }
@@ -659,6 +672,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    prompt_token_estimate: total_input_tokens,
                                 });
                             }
                     }
@@ -713,6 +727,7 @@ async fn run_worker_inner(
                                         turn_count,
                                         total_input_tokens,
                                         total_output_tokens,
+                                        prompt_token_estimate: total_input_tokens,
                                     });
                                     None
                                 }
@@ -793,6 +808,12 @@ async fn run_worker_inner(
                                             turn_count,
                                             total_input_tokens,
                                             total_output_tokens,
+                                            prompt_token_estimate: payload
+                                                .turn
+                                                .usage
+                                                .as_ref()
+                                                .map(|usage| usage.input_tokens as usize)
+                                                .unwrap_or(total_input_tokens),
                                         });
                                         latest_completed_agent_message = None;
                                     }
@@ -823,6 +844,11 @@ async fn run_worker_inner(
                                         turn_count,
                                         total_input_tokens,
                                         total_output_tokens,
+                                        prompt_token_estimate: turn
+                                            .usage
+                                            .as_ref()
+                                            .map(|usage| usage.input_tokens as usize)
+                                            .unwrap_or(total_input_tokens),
                                     });
                                 }
                             }
@@ -845,6 +871,7 @@ async fn run_worker_inner(
                                     let _ = event_tx.send(WorkerEvent::SessionCompacted {
                                         total_input_tokens,
                                         total_output_tokens,
+                                        prompt_token_estimate: payload.session.prompt_token_estimate,
                                     });
                                 }
                             }
@@ -1375,6 +1402,7 @@ mod tests {
             thinking: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            prompt_token_estimate: 0,
             status: SessionRuntimeStatus::Idle,
         };
         let entry = SessionListEntry {
@@ -1405,6 +1433,7 @@ mod tests {
             thinking: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            prompt_token_estimate: 0,
             status: SessionRuntimeStatus::Idle,
         };
         let entry = SessionListEntry {

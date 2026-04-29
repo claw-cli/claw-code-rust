@@ -42,10 +42,24 @@ use crate::history::compaction::CompactAction;
 use crate::history::compaction::CompactionConfig;
 use crate::history::compaction::CompactionKind;
 use crate::history::compaction::compact_history;
-use crate::history::insert_context_diff_message;
 use crate::history::summarizer::DefaultHistorySummarizer;
 use crate::response_item::ResponseItem;
 use crate::response_item::message_to_response_items;
+
+fn estimate_request_prompt_tokens(request: &ModelRequest) -> usize {
+    let system_bytes = request.system.as_ref().map_or(0, String::len);
+    let message_bytes = request
+        .messages
+        .iter()
+        .map(|message| serde_json::to_string(message).map_or(0, |json| json.len()))
+        .sum::<usize>();
+    let tool_bytes = request
+        .tools
+        .as_ref()
+        .map(|tools| serde_json::to_string(tools).map_or(0, |json| json.len()))
+        .unwrap_or(0);
+    (system_bytes + message_bytes + tool_bytes).div_ceil(4)
+}
 
 /// Events emitted during a query for the caller (CLI/UI) to observe.
 #[derive(Debug, Clone)]
@@ -223,9 +237,10 @@ async fn summarize_and_compact(
     max_tokens: usize,
 ) {
     let items: Vec<ResponseItem> = session
-        .messages
+        .prompt_source_messages()
         .iter()
-        .map(|msg| ResponseItem::Message(msg.clone()))
+        .cloned()
+        .flat_map(message_to_response_items)
         .collect();
 
     let token_info = TokenInfo {
@@ -251,9 +266,12 @@ async fn summarize_and_compact(
                     _ => None,
                 })
                 .collect();
-            let removed = session.messages.len().saturating_sub(new_messages.len());
+            let removed = session
+                .prompt_source_messages()
+                .len()
+                .saturating_sub(new_messages.len());
             info!("LLM compaction removed {removed} messages");
-            session.messages = new_messages;
+            session.set_prompt_messages(new_messages);
         }
         Ok(CompactAction::Skipped) => {
             debug!("LLM compaction skipped, nothing to compact");
@@ -350,7 +368,7 @@ pub async fn query(
         .as_ref()
         .and_then(|previous| current_turn_context.diff_since(previous))
     {
-        insert_context_diff_message(&mut session.messages, diff.to_message());
+        session.insert_context_message(diff.to_message());
     }
     if let Some(previous_turn_context) = session.latest_turn_context.as_ref()
         && let Some(diff) = AgentsMdManager::diff(
@@ -358,10 +376,7 @@ pub async fn query(
             current_agents_snapshot.as_ref(),
         )
     {
-        insert_context_diff_message(
-            &mut session.messages,
-            AgentsMdDiffFragment::new(diff).to_message(),
-        );
+        session.insert_context_message(AgentsMdDiffFragment::new(diff).to_message());
     }
     session.latest_turn_context = Some(current_turn_context);
     let session_context = session
@@ -437,7 +452,7 @@ pub async fn query(
 
         let history = History {
             items: session
-                .messages
+                .prompt_source_messages()
                 .iter()
                 .cloned()
                 .flat_map(message_to_response_items)
@@ -483,6 +498,7 @@ pub async fn query(
             reasoning_effort: request_reasoning_effort,
             extra_body,
         };
+        session.prompt_token_estimate = estimate_request_prompt_tokens(&request);
         debug!(
             messages = request.messages.len(),
             tools = request.tools.as_ref().map_or(0, Vec::len),

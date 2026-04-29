@@ -409,10 +409,6 @@ impl ReplayState {
                 .then_with(|| left.intra_record_order.cmp(&right.intra_record_order))
         });
 
-        if let Some(snapshot) = &self.latest_compaction_snapshot {
-            apply_compaction_snapshot(&mut ordered_items, snapshot);
-        }
-
         let mut replayed_messages = self.messages;
         let mut replayed_history_items = self.history_items;
         let mut replayed_persisted_turn_items = Vec::with_capacity(ordered_items.len());
@@ -431,6 +427,12 @@ impl ReplayState {
         }
 
         core_session.messages = replayed_messages;
+        core_session.prompt_messages =
+            self.latest_compaction_snapshot
+                .as_ref()
+                .and_then(|snapshot| {
+                    build_prompt_messages_from_snapshot(&replayed_persisted_turn_items, snapshot)
+                });
         core_session.session_context = self
             .session_context
             .or_else(|| record.session_context.clone());
@@ -443,6 +445,12 @@ impl ReplayState {
         core_session.total_cache_creation_tokens = self.total_cache_creation_tokens;
         core_session.total_cache_read_tokens = self.total_cache_read_tokens;
         core_session.last_input_tokens = self.last_input_tokens;
+        core_session.prompt_token_estimate = core_session
+            .prompt_source_messages()
+            .iter()
+            .map(|message| serde_json::to_string(message).map_or(0, |json| json.len()))
+            .sum::<usize>()
+            .div_ceil(4);
 
         let summary = SessionMetadata {
             session_id: record.id,
@@ -456,6 +464,7 @@ impl ReplayState {
             thinking: record.thinking.clone(),
             total_input_tokens: self.total_input_tokens,
             total_output_tokens: self.total_output_tokens,
+            prompt_token_estimate: core_session.prompt_token_estimate,
             status: SessionRuntimeStatus::Idle,
         };
 
@@ -468,6 +477,7 @@ impl ReplayState {
             loaded_item_count: self.loaded_item_count,
             history_items: replayed_history_items,
             persisted_turn_items: replayed_persisted_turn_items,
+            latest_compaction_snapshot: self.latest_compaction_snapshot,
             steering_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
@@ -525,22 +535,22 @@ struct ReplayHistoryItem {
     turn_item: TurnItem,
 }
 
-fn apply_compaction_snapshot(
-    ordered_items: &mut Vec<ReplayHistoryItem>,
+fn build_prompt_messages_from_snapshot(
+    persisted_turn_items: &[PersistedTurnItem],
     snapshot: &CompactionSnapshotLine,
-) {
-    let Some(summary_index) = ordered_items
+) -> Option<Vec<Message>> {
+    let ordered_items = persisted_turn_items
         .iter()
-        .position(|item| item.item_id == snapshot.summary_item_id)
-    else {
-        return;
-    };
-    let summary_seq = ordered_items[summary_index].seq;
+        .filter(|item| prompt_visible_turn_item(&item.turn_item))
+        .collect::<Vec<_>>();
+    let summary_index = ordered_items
+        .iter()
+        .position(|item| item.item_id == snapshot.summary_item_id)?;
 
-    let mut by_item_id: HashMap<ItemId, ReplayHistoryItem> = ordered_items
+    let mut by_item_id: HashMap<ItemId, PersistedTurnItem> = ordered_items
         .iter()
         .cloned()
-        .map(|item| (item.item_id, item))
+        .map(|item| (item.item_id, item.clone()))
         .collect();
 
     let mut rebuilt = Vec::new();
@@ -557,13 +567,35 @@ fn apply_compaction_snapshot(
     rebuilt.extend(
         ordered_items
             .iter()
-            .filter(|item| item.seq > summary_seq)
+            .skip(summary_index + 1)
             .filter(|item| item.item_id != snapshot.summary_item_id)
             .filter(|item| !snapshot.preserved_item_ids.contains(&item.item_id))
-            .cloned(),
+            .map(|item| (*item).clone()),
     );
 
-    *ordered_items = rebuilt;
+    let mut messages = Vec::new();
+    let mut tool_names_by_id = HashMap::new();
+    for item in rebuilt {
+        apply_prompt_turn_item(&mut messages, &mut tool_names_by_id, item.turn_item.clone());
+    }
+    Some(messages)
+}
+
+fn prompt_visible_turn_item(item: &TurnItem) -> bool {
+    matches!(
+        item,
+        TurnItem::ContextCompaction(_)
+            | TurnItem::UserMessage(_)
+            | TurnItem::SteerInput(_)
+            | TurnItem::AgentMessage(_)
+            | TurnItem::Reasoning(_)
+            | TurnItem::ToolCall(_)
+            | TurnItem::ToolResult(_)
+            | TurnItem::Plan(_)
+            | TurnItem::WebSearch(_)
+            | TurnItem::ImageGeneration(_)
+            | TurnItem::HookPrompt(_)
+    )
 }
 
 fn apply_turn_item(
@@ -676,9 +708,129 @@ fn apply_turn_item(
         TurnItem::Plan(TextItem { text })
         | TurnItem::WebSearch(TextItem { text })
         | TurnItem::ImageGeneration(TextItem { text })
+        | TurnItem::HookPrompt(TextItem { text }) => {
+            messages.push(Message::assistant_text(text));
+        }
+        TurnItem::ContextCompaction(TextItem { .. }) => {}
+        TurnItem::Reasoning(TextItem { text }) => match messages.last_mut() {
+            Some(message) if message.role == Role::Assistant => {
+                message.content.push(ContentBlock::Reasoning { text });
+            }
+            _ => {
+                messages.push(Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Reasoning { text }],
+                });
+            }
+        },
+        TurnItem::ToolProgress(_)
+        | TurnItem::ApprovalRequest(_)
+        | TurnItem::ApprovalDecision(_) => {}
+    }
+}
+
+fn apply_prompt_turn_item(
+    messages: &mut Vec<Message>,
+    tool_names_by_id: &mut HashMap<String, String>,
+    item: TurnItem,
+) {
+    let item = match item {
+        TurnItem::ToolCall(ToolCallItem {
+            tool_call_id,
+            tool_name,
+            input,
+        }) => {
+            tool_names_by_id.insert(tool_call_id.clone(), tool_name.clone());
+            TurnItem::ToolCall(ToolCallItem {
+                tool_call_id,
+                tool_name,
+                input,
+            })
+        }
+        TurnItem::ToolResult(ToolResultItem {
+            tool_call_id,
+            tool_name,
+            output,
+            is_error,
+        }) => TurnItem::ToolResult(ToolResultItem {
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.or_else(|| tool_names_by_id.get(&tool_call_id).cloned()),
+            output,
+            is_error,
+        }),
+        other => other,
+    };
+
+    match item {
+        TurnItem::UserMessage(TextItem { text }) | TurnItem::SteerInput(TextItem { text }) => {
+            messages.push(Message::user(text));
+        }
+        TurnItem::AgentMessage(TextItem { text })
+        | TurnItem::Plan(TextItem { text })
+        | TurnItem::WebSearch(TextItem { text })
+        | TurnItem::ImageGeneration(TextItem { text })
         | TurnItem::ContextCompaction(TextItem { text })
         | TurnItem::HookPrompt(TextItem { text }) => {
             messages.push(Message::assistant_text(text));
+        }
+        TurnItem::ToolCall(ToolCallItem {
+            tool_call_id,
+            tool_name,
+            input,
+        }) => match messages.last_mut() {
+            Some(message) if message.role == Role::Assistant => {
+                message.content.push(ContentBlock::ToolUse {
+                    id: tool_call_id,
+                    name: tool_name,
+                    input,
+                });
+            }
+            _ => {
+                messages.push(Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: tool_call_id,
+                        name: tool_name,
+                        input,
+                    }],
+                });
+            }
+        },
+        TurnItem::ToolResult(ToolResultItem {
+            tool_call_id,
+            tool_name: _,
+            output,
+            is_error,
+        }) => {
+            let content = match output {
+                serde_json::Value::String(text) => text,
+                other => other.to_string(),
+            };
+            match messages.last_mut() {
+                Some(message)
+                    if message.role == Role::User
+                        && message
+                            .content
+                            .iter()
+                            .all(|block| matches!(block, ContentBlock::ToolResult { .. })) =>
+                {
+                    message.content.push(ContentBlock::ToolResult {
+                        tool_use_id: tool_call_id,
+                        content,
+                        is_error,
+                    });
+                }
+                _ => {
+                    messages.push(Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::ToolResult {
+                            tool_use_id: tool_call_id,
+                            content,
+                            is_error,
+                        }],
+                    });
+                }
+            }
         }
         TurnItem::Reasoning(TextItem { text }) => match messages.last_mut() {
             Some(message) if message.role == Role::Assistant => {
@@ -777,11 +929,15 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::ReplayState;
+    use super::build_prompt_messages_from_snapshot;
+    use crate::execution::PersistedTurnItem;
     use crate::persistence::apply_turn_item;
+    use devo_core::CompactionSnapshotLine;
     use devo_core::EnvironmentContext;
     use devo_core::ItemId;
     use devo_core::ItemLine;
     use devo_core::ItemRecord;
+    use devo_core::Message;
     use devo_core::Model;
     use devo_core::Persona;
     use devo_core::RolloutLine;
@@ -908,6 +1064,61 @@ mod tests {
         assert_eq!(history_items.len(), 2);
         assert_eq!(history_items[0].title, "Ran read");
         assert_eq!(history_items[1].title, "read output");
+    }
+
+    #[test]
+    fn prompt_messages_rebuild_from_compaction_snapshot_without_trimming_transcript() {
+        let summary_item_id = ItemId::new();
+        let preserved_item_id = ItemId::new();
+        let later_item_id = ItemId::new();
+
+        let persisted_turn_items = vec![
+            PersistedTurnItem {
+                item_id: ItemId::new(),
+                turn_item: TurnItem::UserMessage(TextItem {
+                    text: "older user".to_string(),
+                }),
+            },
+            PersistedTurnItem {
+                item_id: summary_item_id,
+                turn_item: TurnItem::ContextCompaction(TextItem {
+                    text: "<compaction_summary>summary</compaction_summary>".to_string(),
+                }),
+            },
+            PersistedTurnItem {
+                item_id: preserved_item_id,
+                turn_item: TurnItem::UserMessage(TextItem {
+                    text: "latest user".to_string(),
+                }),
+            },
+            PersistedTurnItem {
+                item_id: later_item_id,
+                turn_item: TurnItem::AgentMessage(TextItem {
+                    text: "latest assistant".to_string(),
+                }),
+            },
+        ];
+
+        let prompt_messages = build_prompt_messages_from_snapshot(
+            &persisted_turn_items,
+            &CompactionSnapshotLine {
+                timestamp: Utc::now(),
+                session_id: SessionId::new(),
+                turn_id: TurnId::new(),
+                summary_item_id,
+                preserved_item_ids: vec![preserved_item_id],
+            },
+        )
+        .expect("prompt messages");
+
+        assert_eq!(
+            prompt_messages,
+            vec![
+                Message::assistant_text("<compaction_summary>summary</compaction_summary>"),
+                Message::user("latest user"),
+                Message::assistant_text("latest assistant"),
+            ]
+        );
     }
 
     #[test]

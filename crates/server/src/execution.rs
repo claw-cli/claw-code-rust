@@ -223,6 +223,8 @@ pub(crate) struct RuntimeSession {
     pub(crate) history_items: Vec<SessionHistoryItem>,
     /// Canonical persisted turn items in prompt order for replay/compaction bookkeeping.
     pub(crate) persisted_turn_items: Vec<PersistedTurnItem>,
+    /// Latest compaction snapshot used to rebuild the model-facing prompt view.
+    pub(crate) latest_compaction_snapshot: Option<devo_core::CompactionSnapshotLine>,
     /// Pending same-turn steering inputs.
     pub(crate) steering_queue: Arc<StdMutex<VecDeque<String>>>,
     /// Live query task for the active turn.
