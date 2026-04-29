@@ -17,9 +17,8 @@ use tracing::warn;
 
 use devo_provider::ModelProviderSDK;
 use devo_tools::ToolCall;
-use devo_tools::ToolContext;
-use devo_tools::ToolOrchestrator;
 use devo_tools::ToolRegistry;
+use devo_tools::ToolRuntime;
 
 use crate::AgentError;
 use crate::ContentBlock;
@@ -336,7 +335,7 @@ pub async fn query(
     turn_config: &TurnConfig,
     provider: Arc<dyn ModelProviderSDK>,
     registry: Arc<ToolRegistry>,
-    orchestrator: &ToolOrchestrator,
+    runtime: &ToolRuntime,
     on_event: Option<EventCallback>,
 ) -> Result<(), AgentError> {
     // emit is the event callback function.
@@ -762,31 +761,24 @@ pub async fn query(
         }
 
         // Execute tool calls
-        let tool_ctx = ToolContext {
-            cwd: session.cwd.clone(),
-            permissions: Arc::new(devo_safety::legacy_permissions::RuleBasedPolicy::new(
-                session.config.permission_mode,
-            )),
-            session_id: session.id.clone(),
-        };
-
-        let results = orchestrator.execute_batch(&tool_calls, &tool_ctx).await;
+        let results = runtime.execute_batch(&tool_calls).await;
 
         // Build tool result message (user role, per Anthropic API convention)
         // Apply micro-compact to large tool results
         let result_content: Vec<ContentBlock> = results
             .into_iter()
             .map(|r| {
-                let compacted_content = micro_compact(r.output.content.clone());
+                let content_str = r.content.into_string();
+                let compacted_content = micro_compact(content_str);
                 emit(QueryEvent::ToolResult {
                     tool_use_id: r.tool_use_id.clone(),
                     content: compacted_content.clone(),
-                    is_error: r.output.is_error,
+                    is_error: r.is_error,
                 });
                 ContentBlock::ToolResult {
                     tool_use_id: r.tool_use_id,
                     content: compacted_content,
-                    is_error: r.output.is_error,
+                    is_error: r.is_error,
                 }
             })
             .collect();
@@ -887,10 +879,15 @@ mod tests {
     use devo_protocol::Usage;
     use devo_provider::ModelProviderSDK;
     use devo_safety::legacy_permissions::PermissionMode;
-    use devo_tools::Tool;
-    use devo_tools::ToolOrchestrator;
-    use devo_tools::ToolOutput;
     use devo_tools::ToolRegistry;
+    use devo_tools::ToolRuntime;
+    use devo_tools::errors::ToolExecutionError;
+    use devo_tools::handler_kind::ToolHandlerKind;
+    use devo_tools::invocation::{FunctionToolOutput, ToolInvocation, ToolOutput};
+    use devo_tools::json_schema::JsonSchema;
+    use devo_tools::registry::ToolRegistryBuilder;
+    use devo_tools::tool_handler::ToolHandler;
+    use devo_tools::tool_spec::{ToolExecutionMode, ToolOutputMode, ToolSpec};
     use futures::Stream;
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -1126,31 +1123,17 @@ mod tests {
     }
 
     #[async_trait]
-    impl Tool for MutatingTool {
-        fn name(&self) -> &str {
-            "mutating_tool"
+    #[async_trait]
+    impl ToolHandler for MutatingTool {
+        fn tool_kind(&self) -> ToolHandlerKind {
+            ToolHandlerKind::Write
         }
 
-        fn description(&self) -> &str {
-            "A test-only mutating tool."
-        }
-
-        fn input_schema(&self) -> serde_json::Value {
-            json!({
-                "type": "object",
-                "properties": {
-                    "value": { "type": "integer" }
-                },
-                "required": ["value"]
-            })
-        }
-
-        async fn execute(
+        async fn handle(
             &self,
-            _ctx: &devo_tools::ToolContext,
-            _input: serde_json::Value,
-        ) -> Result<ToolOutput> {
-            Ok(ToolOutput::success("ok"))
+            _invocation: ToolInvocation,
+        ) -> Result<Box<dyn ToolOutput>, ToolExecutionError> {
+            Ok(Box::new(FunctionToolOutput::success("ok")))
         }
     }
 
@@ -1161,7 +1144,7 @@ mod tests {
         });
         let provider_sdk: Arc<dyn ModelProviderSDK> = provider.clone();
         let registry = Arc::new(ToolRegistry::new());
-        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
         let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
         session.push_message(Message::user("hello"));
 
@@ -1173,7 +1156,7 @@ mod tests {
             },
             provider_sdk,
             registry,
-            &orchestrator,
+            &runtime,
             None,
         )
         .await
@@ -1193,7 +1176,7 @@ mod tests {
         });
         let provider_sdk: Arc<dyn ModelProviderSDK> = provider.clone();
         let registry = Arc::new(ToolRegistry::new());
-        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
         let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
         session.push_message(Message::user("hello"));
 
@@ -1205,7 +1188,7 @@ mod tests {
             },
             provider_sdk,
             registry,
-            &orchestrator,
+            &runtime,
             None,
         )
         .await
@@ -1220,10 +1203,19 @@ mod tests {
 
     #[tokio::test]
     async fn query_uses_session_permission_mode_for_mutating_tools() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(MutatingTool));
-        let registry = Arc::new(registry);
-        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let mut builder = ToolRegistryBuilder::new();
+        builder.register_handler("mutating_tool", Arc::new(MutatingTool));
+        builder.push_spec(ToolSpec {
+            name: "mutating_tool".into(),
+            description: "A test-only mutating tool.".into(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::Text,
+            execution_mode: ToolExecutionMode::Mutating,
+            capability_tags: vec![],
+            supports_parallel: false,
+        });
+        let registry = Arc::new(builder.build());
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
 
         let mut session = SessionState::new(
             SessionConfig {
@@ -1244,7 +1236,7 @@ mod tests {
                 requests: AtomicUsize::new(0),
             }),
             registry,
-            &orchestrator,
+            &runtime,
             None,
         )
         .await
@@ -1287,7 +1279,7 @@ mod tests {
             requests: Arc::clone(&requests),
         });
         let registry = Arc::new(ToolRegistry::new());
-        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
         let model = Model {
             slug: "kimi-k2.5".into(),
             display_name: "Kimi K2.5".into(),
@@ -1340,7 +1332,7 @@ mod tests {
             },
             Arc::clone(&provider),
             registry,
-            &orchestrator,
+            &runtime,
             None,
         )
         .await
@@ -1359,7 +1351,7 @@ mod tests {
             requests: Arc::clone(&requests),
         });
         let registry = Arc::new(ToolRegistry::new());
-        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
         let temp_root =
             std::env::temp_dir().join(format!("devo-query-lock-{}", uuid::Uuid::new_v4()));
         let second_cwd = temp_root.join("nested");
@@ -1385,7 +1377,7 @@ mod tests {
             },
             Arc::clone(&provider),
             Arc::clone(&registry),
-            &orchestrator,
+            &runtime,
             None,
         )
         .await
@@ -1402,7 +1394,7 @@ mod tests {
             },
             Arc::clone(&provider),
             registry,
-            &orchestrator,
+            &runtime,
             None,
         )
         .await
@@ -1434,7 +1426,7 @@ mod tests {
             requests: Arc::clone(&requests),
         });
         let registry = Arc::new(ToolRegistry::new());
-        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
         let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
         let first_model = Model {
             slug: "model-a".into(),
@@ -1454,7 +1446,7 @@ mod tests {
             },
             Arc::clone(&provider),
             Arc::clone(&registry),
-            &orchestrator,
+            &runtime,
             None,
         )
         .await
@@ -1469,7 +1461,7 @@ mod tests {
             },
             Arc::clone(&provider),
             registry,
-            &orchestrator,
+            &runtime,
             None,
         )
         .await
@@ -1492,7 +1484,7 @@ mod tests {
             requests: Arc::clone(&requests),
         });
         let registry = Arc::new(ToolRegistry::new());
-        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
         let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
 
         session.push_message(Message::user("first"));
@@ -1519,7 +1511,7 @@ mod tests {
             },
             provider,
             registry,
-            &orchestrator,
+            &runtime,
             None,
         )
         .await
@@ -1608,7 +1600,7 @@ mod tests {
         }
 
         let registry = Arc::new(ToolRegistry::new());
-        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
         let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
         session.push_message(Message::user("hello"));
         let seen_events = Arc::new(Mutex::new(Vec::new()));
@@ -1625,7 +1617,7 @@ mod tests {
             },
             Arc::new(ReasoningProvider),
             registry,
-            &orchestrator,
+            &runtime,
             Some(callback),
         )
         .await
@@ -1666,7 +1658,7 @@ mod tests {
             requests: Arc::clone(&requests),
         });
         let registry = Arc::new(ToolRegistry::new());
-        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
         let model = Model {
             slug: "deepseek-v4-flash".into(),
             provider: devo_protocol::ProviderWireApi::OpenAIChatCompletions,
@@ -1686,7 +1678,7 @@ mod tests {
             },
             Arc::clone(&provider),
             registry,
-            &orchestrator,
+            &runtime,
             None,
         )
         .await

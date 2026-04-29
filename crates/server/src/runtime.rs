@@ -34,7 +34,7 @@ use devo_core::history::summarizer::DefaultHistorySummarizer;
 use devo_core::message_to_response_items;
 use devo_core::query;
 use devo_core::{ResponseItem, TokenInfo};
-use devo_tools::ToolOrchestrator;
+use devo_tools::ToolRuntime;
 
 use crate::ClientTransportKind;
 use crate::ConnectionState;
@@ -1921,13 +1921,13 @@ impl ServerRuntime {
                 let _ = event_callback_tx.send(event);
             });
             let registry = Arc::clone(&self.deps.registry);
-            let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+            let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
             let result = query(
                 &mut core_session,
                 &turn_config,
                 self.deps.provider.clone(),
                 registry,
-                &orchestrator,
+                &runtime,
                 Some(callback),
             )
             .await;

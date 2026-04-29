@@ -39,12 +39,14 @@ pub(crate) fn default_max_output_tokens() -> usize {
     DEFAULT_MAX_OUTPUT_TOKENS
 }
 
+#[allow(dead_code)]
 pub(crate) fn windows_destructive_filesystem_guidance() -> &'static str {
     r#"Windows safety rules:
 - Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to `cmd /c`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as `Remove-Item` / `Move-Item` with `-LiteralPath`, and avoid string-built shell commands for file operations.
 - Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked."#
 }
 
+#[allow(dead_code)]
 pub(crate) fn shell_command_description() -> String {
     if cfg!(windows) {
         format!(
