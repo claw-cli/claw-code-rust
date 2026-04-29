@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use crossterm::event::KeyCode;
+use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
 use devo_protocol::Model;
 use devo_protocol::ModelCatalog;
@@ -56,6 +57,7 @@ struct InteractiveLoopState {
     // replacement session has been restored into widget state.
     session_switch_pending: bool,
     last_ctrl_c_at: Option<Instant>,
+    pending_interrupt_esc: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,10 +271,25 @@ fn handle_tui_event(
                     loop_state.last_ctrl_c_at = Some(now);
                     chat_widget.set_status_message("Press Ctrl-C again to exit");
                 }
-            } else {
-                loop_state.last_ctrl_c_at = None;
-                chat_widget.handle_key_event(key);
+                return Ok(LoopAction::Continue);
             }
+
+            // Double Esc: interrupt the current turn.
+            if key.code == KeyCode::Esc && key.kind == KeyEventKind::Press && loop_state.busy {
+                if loop_state.pending_interrupt_esc {
+                    loop_state.pending_interrupt_esc = false;
+                    worker.interrupt_turn()?;
+                    chat_widget.set_status_message("Interrupted;");
+                } else {
+                    loop_state.pending_interrupt_esc = true;
+                    chat_widget.set_status_message("Press ESC again to stop");
+                }
+                return Ok(LoopAction::Continue);
+            }
+            loop_state.pending_interrupt_esc = false;
+
+            loop_state.last_ctrl_c_at = None;
+            chat_widget.handle_key_event(key);
         }
         TuiEvent::Paste(pasted) => {
             // Many terminals convert newlines to \r when pasting (e.g., iTerm2),
@@ -360,9 +377,11 @@ fn handle_worker_event(
             loop_state.total_input_tokens = *next_total_input_tokens;
             loop_state.total_output_tokens = *next_total_output_tokens;
             loop_state.session_switch_pending = false;
+            loop_state.pending_interrupt_esc = false;
         }
         WorkerEvent::TurnStarted { .. } => {
             loop_state.busy = true;
+            loop_state.pending_interrupt_esc = false;
         }
         WorkerEvent::UsageUpdated {
             total_input_tokens: next_total_input_tokens,

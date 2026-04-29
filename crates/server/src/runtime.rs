@@ -1193,25 +1193,21 @@ impl ServerRuntime {
                 let active_turn_id = session.active_turn.as_ref().expect("active turn").turn_id;
                 drop(session);
 
-                steering_queue
-                    .lock()
-                    .expect("steering queue mutex should not be poisoned")
-                    .push_back(devo_core::PendingInputItem {
+                {
+                    let mut guard = steering_queue
+                        .lock()
+                        .expect("steering queue mutex should not be poisoned");
+                    guard.push_back(devo_core::PendingInputItem {
                         kind: devo_core::PendingInputKind::UserText {
                             text: input_text.clone(),
                         },
                         metadata: None,
                         created_at: chrono::Utc::now(),
                     });
-                let pending_count = steering_queue.lock().expect("lock").len();
-                self.broadcast_event(ServerEvent::InputQueueUpdated(
-                    devo_core::InputQueueUpdatedPayload {
-                        session_id: params.session_id,
-                        pending_count,
-                        pending_texts: vec![display_input.clone()],
-                    },
-                ))
-                .await;
+                }
+                // Broadcast queue state; this is the only .await in the path
+                // so the client sees the response without noticeable delay.
+                self.broadcast_updated_queue(params.session_id).await;
                 return serde_json::to_value(SuccessResponse {
                     id: request_id,
                     result: TurnStartResult {

@@ -339,6 +339,31 @@ impl ChatWidget {
         Some((used, usable, total))
     }
 
+    fn format_compact_token_count(value: usize) -> String {
+        if value >= 1_000_000 {
+            format!("{:.1}M", value as f64 / 1_000_000.0)
+        } else if value >= 1_000 {
+            format!("{:.0}k", value as f64 / 1_000.0)
+        } else {
+            value.to_string()
+        }
+    }
+
+    fn render_progress_bar(used: usize, total: usize, bar_width: usize) -> String {
+        if total == 0 {
+            return String::new();
+        }
+        let ratio = (used as f64 / total as f64).clamp(0.0, 1.0);
+        let filled = (ratio * bar_width as f64).round() as usize;
+        let empty = bar_width.saturating_sub(filled);
+        let bar: String = std::iter::repeat('█')
+            .take(filled)
+            .chain(std::iter::repeat('░').take(empty))
+            .collect();
+        let pct = (ratio * 100.0).round() as usize;
+        format!("{bar} {pct}% ({})", Self::format_compact_token_count(used))
+    }
+
     fn session_summary_text(&self) -> String {
         let model = self
             .session
@@ -348,21 +373,21 @@ impl ChatWidget {
             .unwrap_or("unknown");
         let thinking = self.thinking_selection.as_deref().unwrap_or("default");
         let context = self.context_budget().map_or_else(
-            || "context n/a".to_string(),
-            |(used, usable, total)| {
-                format!(
-                    "context {} / {} usable ({} total)",
-                    Self::format_token_count(used),
-                    Self::format_token_count(usable),
-                    Self::format_token_count(total)
-                )
-            },
+            || String::new(),
+            |(used, usable, _total)| Self::render_progress_bar(used, usable, 10),
         );
 
-        format!(
-            "{model} | thinking {thinking} | tokens {} in / {} out | {context}",
-            self.total_input_tokens, self.total_output_tokens
-        )
+        let mut parts: Vec<String> = Vec::new();
+        parts.push(format!("{model} {thinking}"));
+        parts.push(format!(
+            "\u{2191}{} \u{2193}{}",
+            Self::format_compact_token_count(self.total_input_tokens),
+            Self::format_compact_token_count(self.total_output_tokens)
+        ));
+        if !context.is_empty() {
+            parts.push(context);
+        }
+        parts.join("  ")
     }
 
     fn sync_bottom_pane_summary(&mut self) {
