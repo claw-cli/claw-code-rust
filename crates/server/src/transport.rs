@@ -88,8 +88,13 @@ pub async fn run_listeners(runtime: Arc<ServerRuntime>, listen: &[String]) -> Re
 }
 
 async fn run_stdio(runtime: Arc<ServerRuntime>) -> Result<()> {
+    // Normal channel for event notifications (TextDelta, TurnStarted, …).
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let sender_clone = sender.clone();
+    // High-priority channel for RPC responses that must not be blocked by
+    // a backlog of event notifications on the normal channel.
+    let (high_pri_sender, mut high_pri_receiver) = mpsc::unbounded_channel();
+    runtime.set_high_pri_sender(high_pri_sender).await;
     let connection_id = runtime
         .register_connection(ClientTransportKind::Stdio, sender)
         .await;
@@ -97,11 +102,27 @@ async fn run_stdio(runtime: Arc<ServerRuntime>) -> Result<()> {
 
     let stdout_task = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
-        while let Some(message) = receiver.recv().await {
-            let line = serde_json::to_vec(&message).expect("serialize stdio response");
-            stdout.write_all(&line).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
+        loop {
+            tokio::select! {
+                // High-priority responses always go first.
+                Some(message) = high_pri_receiver.recv() => {
+                    let line = serde_json::to_vec(&message)
+                        .expect("serialize high-priority response");
+                    stdout.write_all(&line).await?;
+                    stdout.write_all(b"\n").await?;
+                    stdout.flush().await?;
+                }
+                // Normal notifications are only written when the high-priority
+                // channel is empty.
+                Some(message) = receiver.recv(), if high_pri_receiver.is_empty() => {
+                    let line = serde_json::to_vec(&message)
+                        .expect("serialize stdio response");
+                    stdout.write_all(&line).await?;
+                    stdout.write_all(b"\n").await?;
+                    stdout.flush().await?;
+                }
+                else => break,
+            }
         }
         Result::<()>::Ok(())
     });

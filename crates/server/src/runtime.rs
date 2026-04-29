@@ -105,6 +105,11 @@ pub struct ServerRuntime {
     connections: Mutex<HashMap<u64, ConnectionRuntime>>,
     active_tasks: Mutex<HashMap<SessionId, tokio::task::AbortHandle>>,
     next_connection_id: AtomicU64,
+    /// High-priority channel for RPC responses that must not be blocked by
+    /// event notifications (TextDelta, etc.). Set by the stdio transport on
+    /// startup. When set, `handle_turn_start` sends busy-path responses here
+    /// so they bypass the shared event channel.
+    high_pri_tx: Mutex<Option<mpsc::UnboundedSender<serde_json::Value>>>,
 }
 
 impl ServerRuntime {
@@ -131,7 +136,15 @@ impl ServerRuntime {
             connections: Mutex::new(HashMap::new()),
             active_tasks: Mutex::new(HashMap::new()),
             next_connection_id: AtomicU64::new(1),
+            high_pri_tx: Mutex::new(None),
         })
+    }
+
+    /// Register a high-priority response channel. When set, RPC handlers that
+    /// need to bypass the shared event channel (e.g. turn/start during a busy
+    /// turn) can send their responses here instead.
+    pub async fn set_high_pri_sender(&self, tx: mpsc::UnboundedSender<serde_json::Value>) {
+        *self.high_pri_tx.lock().await = Some(tx);
     }
 
     /// Loads durable sessions from rollout files and installs them into the runtime map.
@@ -223,7 +236,7 @@ impl ServerRuntime {
             });
         }
 
-        match method.as_str() {
+        let response = match method.as_str() {
             "session/start" => Some(self.handle_session_start(connection_id, id?, params).await),
             "session/list" => Some(self.handle_session_list(id?, params).await),
             "session/metadata/update" => {
@@ -252,6 +265,11 @@ impl ServerRuntime {
                 ProtocolErrorCode::InvalidParams,
                 format!("unknown method: {method}"),
             )),
+        };
+        // Filter out responses already dispatched via the high-priority channel.
+        match response {
+            Some(serde_json::Value::Null) => None,
+            other => other,
         }
     }
 
@@ -1205,22 +1223,29 @@ impl ServerRuntime {
                         created_at: chrono::Utc::now(),
                     });
                 }
-                // Respond immediately so the client never sees a timeout.
+                // Send response via the high-priority channel so it bypasses
+                // any backlog of event notifications on the shared channel.
                 // Broadcast the queue update asynchronously in the background.
+                if let Some(tx) = self.high_pri_tx.lock().await.as_ref() {
+                    let response = serde_json::to_value(SuccessResponse {
+                        id: request_id,
+                        result: TurnStartResult {
+                            turn_id: active_turn_id,
+                            status: TurnStatus::Running,
+                            accepted_at: now,
+                        },
+                    })
+                    .expect("serialize turn/start response");
+                    let _ = tx.send(response);
+                }
                 let sid = params.session_id;
                 let runtime = Arc::clone(&self);
                 tokio::spawn(async move {
                     runtime.broadcast_updated_queue(sid).await;
                 });
-                return serde_json::to_value(SuccessResponse {
-                    id: request_id,
-                    result: TurnStartResult {
-                        turn_id: active_turn_id,
-                        status: TurnStatus::Running,
-                        accepted_at: now,
-                    },
-                })
-                .expect("serialize turn/start response");
+                // Signal to handle_incoming that the response was already sent
+                // via the high-priority channel, so it should not send a duplicate.
+                return serde_json::Value::Null;
             }
             if let Some(cwd) = params.cwd.clone() {
                 session.summary.cwd = cwd.clone();
