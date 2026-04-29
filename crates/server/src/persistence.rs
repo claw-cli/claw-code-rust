@@ -358,6 +358,7 @@ impl ReplayState {
                     session_id: line.turn.session_id,
                     sequence: line.turn.sequence,
                     status: line.turn.status.clone(),
+                    kind: line.turn.kind.clone(),
                     model: line.turn.model.clone(),
                     thinking: line.turn.thinking.clone(),
                     request_model: line.turn.request_model.clone(),
@@ -481,8 +482,12 @@ impl ReplayState {
             steering_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
+            steer_input_queue: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             active_task: None,
             next_item_seq: self.next_item_seq.max(1),
+            first_user_input: None,
         })
     }
 
@@ -880,6 +885,7 @@ pub(crate) fn build_turn_record(
         started_at: turn.started_at,
         completed_at: turn.completed_at,
         status: turn.status.clone(),
+        kind: turn.kind.clone(),
         model: turn.model.clone(),
         thinking: turn.thinking.clone(),
         request_model: turn.request_model.clone(),
@@ -1206,6 +1212,7 @@ mod tests {
                     started_at: now,
                     completed_at: Some(now),
                     status: TurnStatus::Completed,
+                    kind: devo_core::TurnKind::Regular,
                     model: "model-b".into(),
                     thinking: Some("enabled".into()),
                     request_model: "model-b".into(),

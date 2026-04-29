@@ -322,7 +322,7 @@ mod tests {
             cmds,
             vec![
                 "model", "compact", "thinking", "resume", "new", "status", "clear", "onboard",
-                "diff", "exit",
+                "diff", "btw", "exit",
             ]
         );
     }

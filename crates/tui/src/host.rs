@@ -269,10 +269,11 @@ fn handle_tui_event(
                     loop_state.last_ctrl_c_at = Some(now);
                     chat_widget.set_status_message("Press Ctrl-C again to exit");
                 }
-            } else {
-                loop_state.last_ctrl_c_at = None;
-                chat_widget.handle_key_event(key);
+                return Ok(LoopAction::Continue);
             }
+
+            loop_state.last_ctrl_c_at = None;
+            chat_widget.handle_key_event(key);
         }
         TuiEvent::Paste(pasted) => {
             // Many terminals convert newlines to \r when pasting (e.g., iTerm2),
@@ -364,6 +365,8 @@ fn handle_worker_event(
         WorkerEvent::TurnStarted { .. } => {
             loop_state.busy = true;
         }
+        // Streaming deltas are handled entirely within the ChatWidget
+        WorkerEvent::ToolOutputDelta { .. } => {}
         WorkerEvent::UsageUpdated {
             total_input_tokens: next_total_input_tokens,
             total_output_tokens: next_total_output_tokens,
@@ -420,7 +423,9 @@ fn handle_worker_event(
         | WorkerEvent::NewSessionPrepared { .. }
         | WorkerEvent::SessionRenamed { .. }
         | WorkerEvent::SessionTitleUpdated { .. }
-        | WorkerEvent::InputHistoryLoaded { .. } => {}
+        | WorkerEvent::InputHistoryLoaded { .. }
+        | WorkerEvent::InputQueueUpdated { .. }
+        | WorkerEvent::SteerAccepted { .. } => {}
     }
     if matches!(&worker_event, WorkerEvent::SessionsListed { .. }) {
         loop_state.resume_browser_pending = false;
@@ -465,6 +470,20 @@ fn handle_app_command(
                 .collect::<Vec<_>>()
                 .join("\n");
             worker.submit_prompt(prompt)?;
+        }
+        AppCommand::SteerTurn {
+            input,
+            expected_turn_id,
+        } => {
+            let prompt = input
+                .iter()
+                .filter_map(|item| match item {
+                    devo_protocol::InputItem::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            worker.submit_steer(prompt, *expected_turn_id)?;
         }
         AppCommand::OverrideTurnContext {
             model, thinking, ..

@@ -79,6 +79,25 @@ pub struct SessionHistoryItem {
     pub kind: SessionHistoryItemKind,
     pub title: String,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+impl SessionHistoryItem {
+    pub fn new(
+        tool_call_id: Option<String>,
+        kind: SessionHistoryItemKind,
+        title: String,
+        body: String,
+    ) -> Self {
+        Self {
+            tool_call_id,
+            kind,
+            title,
+            body,
+            duration_ms: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

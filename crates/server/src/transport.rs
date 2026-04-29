@@ -88,17 +88,30 @@ pub async fn run_listeners(runtime: Arc<ServerRuntime>, listen: &[String]) -> Re
 }
 
 async fn run_stdio(runtime: Arc<ServerRuntime>) -> Result<()> {
+    // Normal channel for event notifications (TextDelta, TurnStarted, …).
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let sender_clone = sender.clone();
+    // High-priority channel for RPC responses that must not be blocked by
+    // a backlog of event notifications on the normal channel.
+    let (high_pri_sender, mut high_pri_receiver) = mpsc::unbounded_channel();
+    runtime.set_high_pri_sender(high_pri_sender).await;
     let connection_id = runtime
         .register_connection(ClientTransportKind::Stdio, sender)
         .await;
     tracing::info!(connection_id, "stdio connection established");
 
-    let stdout_task = tokio::spawn(async move {
+    // Internal channel between the producer (reads from high_pri + normal)
+    // and the writer (writes to stdout). Unbounded so the producer never
+    // blocks — if stdout is slow, messages queue here instead of blocking
+    // the select loop that processes RPC responses.
+    let (write_tx, mut write_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+    // --- Writer task ---
+    // Sole responsibility: read serialized lines from write_rx and write
+    // them to stdout. This is the only task that can block on stdout.
+    let writer_task = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
-        while let Some(message) = receiver.recv().await {
-            let line = serde_json::to_vec(&message).expect("serialize stdio response");
+        while let Some(line) = write_rx.recv().await {
             stdout.write_all(&line).await?;
             stdout.write_all(b"\n").await?;
             stdout.flush().await?;
@@ -106,6 +119,30 @@ async fn run_stdio(runtime: Arc<ServerRuntime>) -> Result<()> {
         Result::<()>::Ok(())
     });
 
+    // --- Producer task ---
+    // Reads from high_pri and normal channels, serializes immediately,
+    // and pushes to write_tx. Never blocks on stdout.
+    let producer_task = tokio::spawn(async move {
+        loop {
+            let line: Vec<u8>;
+            tokio::select! {
+                Some(message) = high_pri_receiver.recv() => {
+                    line = serde_json::to_vec(&message)
+                        .expect("serialize high-priority response");
+                }
+                Some(message) = receiver.recv(), if high_pri_receiver.is_empty() => {
+                    line = serde_json::to_vec(&message)
+                        .expect("serialize stdio response");
+                }
+                else => break,
+            }
+            if write_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    // --- Stdin reader (main task) ---
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
     while let Some(line) = lines.next_line().await? {
@@ -120,7 +157,8 @@ async fn run_stdio(runtime: Arc<ServerRuntime>) -> Result<()> {
 
     runtime.unregister_connection(connection_id).await;
     tracing::info!(connection_id, "stdio connection closed");
-    stdout_task.abort();
+    writer_task.abort();
+    producer_task.abort();
     Ok(())
 }
 

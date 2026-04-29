@@ -34,7 +34,7 @@ use devo_core::history::summarizer::DefaultHistorySummarizer;
 use devo_core::message_to_response_items;
 use devo_core::query;
 use devo_core::{ResponseItem, TokenInfo};
-use devo_tools::ToolOrchestrator;
+use devo_tools::ToolRuntime;
 
 use crate::ClientTransportKind;
 use crate::ConnectionState;
@@ -105,6 +105,11 @@ pub struct ServerRuntime {
     connections: Mutex<HashMap<u64, ConnectionRuntime>>,
     active_tasks: Mutex<HashMap<SessionId, tokio::task::AbortHandle>>,
     next_connection_id: AtomicU64,
+    /// High-priority channel for RPC responses that must not be blocked by
+    /// event notifications (TextDelta, etc.). Set by the stdio transport on
+    /// startup. When set, `handle_turn_start` sends busy-path responses here
+    /// so they bypass the shared event channel.
+    high_pri_tx: Mutex<Option<mpsc::UnboundedSender<serde_json::Value>>>,
 }
 
 impl ServerRuntime {
@@ -131,7 +136,15 @@ impl ServerRuntime {
             connections: Mutex::new(HashMap::new()),
             active_tasks: Mutex::new(HashMap::new()),
             next_connection_id: AtomicU64::new(1),
+            high_pri_tx: Mutex::new(None),
         })
+    }
+
+    /// Register a high-priority response channel. When set, RPC handlers that
+    /// need to bypass the shared event channel (e.g. turn/start during a busy
+    /// turn) can send their responses here instead.
+    pub async fn set_high_pri_sender(&self, tx: mpsc::UnboundedSender<serde_json::Value>) {
+        *self.high_pri_tx.lock().await = Some(tx);
     }
 
     /// Loads durable sessions from rollout files and installs them into the runtime map.
@@ -223,7 +236,7 @@ impl ServerRuntime {
             });
         }
 
-        match method.as_str() {
+        let response = match method.as_str() {
             "session/start" => Some(self.handle_session_start(connection_id, id?, params).await),
             "session/list" => Some(self.handle_session_list(id?, params).await),
             "session/metadata/update" => {
@@ -252,6 +265,11 @@ impl ServerRuntime {
                 ProtocolErrorCode::InvalidParams,
                 format!("unknown method: {method}"),
             )),
+        };
+        // Filter out responses already dispatched via the high-priority channel.
+        match response {
+            Some(serde_json::Value::Null) => None,
+            other => other,
         }
     }
 
@@ -361,6 +379,7 @@ impl ServerRuntime {
         }
         let core_session = self.deps.new_session_state(session_id, params.cwd.clone());
         let steering_queue = Arc::clone(&core_session.pending_user_prompts);
+        let steer_input_queue = Arc::clone(&core_session.steer_input_queue);
         self.sessions.lock().await.insert(
             session_id,
             RuntimeSession {
@@ -374,8 +393,10 @@ impl ServerRuntime {
                 persisted_turn_items: Vec::new(),
                 latest_compaction_snapshot: None,
                 steering_queue,
+                steer_input_queue,
                 active_task: None,
                 next_item_seq: 1,
+                first_user_input: None,
             }
             .shared(),
         );
@@ -673,6 +694,7 @@ impl ServerRuntime {
         drop(source_core_session);
         drop(source);
         let steering_queue = Arc::clone(&core_session.pending_user_prompts);
+        let steer_input_queue = Arc::clone(&core_session.steer_input_queue);
         self.sessions.lock().await.insert(
             forked_id,
             RuntimeSession {
@@ -686,8 +708,10 @@ impl ServerRuntime {
                 persisted_turn_items,
                 latest_compaction_snapshot,
                 steering_queue,
+                steer_input_queue,
                 active_task: None,
                 next_item_seq: loaded_item_count + 1,
+                first_user_input: None,
             }
             .shared(),
         );
@@ -1184,11 +1208,48 @@ impl ServerRuntime {
         let turn = {
             let mut session = session_arc.lock().await;
             if session.active_turn.is_some() {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::TurnAlreadyRunning,
-                    "session already has an active turn",
-                );
+                // Queue instead of rejecting — push directly to the steering_queue
+                // (independent lock) so we don't block on core_session which is
+                // held by the running query() loop.
+                let steering_queue = Arc::clone(&session.steering_queue);
+                let active_turn_id = session.active_turn.as_ref().expect("active turn").turn_id;
+                drop(session);
+
+                {
+                    let mut guard = steering_queue
+                        .lock()
+                        .expect("steering queue mutex should not be poisoned");
+                    guard.push_back(devo_core::PendingInputItem {
+                        kind: devo_core::PendingInputKind::UserText {
+                            text: input_text.clone(),
+                        },
+                        metadata: None,
+                        created_at: chrono::Utc::now(),
+                    });
+                }
+                // Send response via the high-priority channel so it bypasses
+                // any backlog of event notifications on the shared channel.
+                // Broadcast the queue update asynchronously in the background.
+                if let Some(tx) = self.high_pri_tx.lock().await.as_ref() {
+                    let response = serde_json::to_value(SuccessResponse {
+                        id: request_id,
+                        result: TurnStartResult {
+                            turn_id: active_turn_id,
+                            status: TurnStatus::Running,
+                            accepted_at: now,
+                        },
+                    })
+                    .expect("serialize turn/start response");
+                    let _ = tx.send(response);
+                }
+                let sid = params.session_id;
+                let runtime = Arc::clone(&self);
+                tokio::spawn(async move {
+                    runtime.broadcast_updated_queue(sid).await;
+                });
+                // Signal to handle_incoming that the response was already sent
+                // via the high-priority channel, so it should not send a duplicate.
+                return serde_json::Value::Null;
             }
             if let Some(cwd) = params.cwd.clone() {
                 session.summary.cwd = cwd.clone();
@@ -1215,6 +1276,7 @@ impl ServerRuntime {
                     .as_ref()
                     .map_or(1, |turn| turn.sequence + 1),
                 status: TurnStatus::Running,
+                kind: devo_core::TurnKind::Regular,
                 model: turn_config.model.slug.clone(),
                 thinking: turn_config.thinking_selection.clone(),
                 request_model: resolved_request.request_model,
@@ -1231,6 +1293,19 @@ impl ServerRuntime {
                 .lock()
                 .expect("steering queue mutex should not be poisoned")
                 .clear();
+            let clear_session_id = params.session_id;
+            let runtime_for_broadcast = Arc::clone(self);
+            tokio::spawn(async move {
+                runtime_for_broadcast
+                    .broadcast_event(ServerEvent::InputQueueUpdated(
+                        devo_core::InputQueueUpdatedPayload {
+                            session_id: clear_session_id,
+                            pending_count: 0,
+                            pending_texts: vec![],
+                        },
+                    ))
+                    .await;
+            });
             let runtime = Arc::clone(self);
             let turn_for_task = turn.clone();
             let display_input_for_task = display_input.clone();
@@ -1255,6 +1330,32 @@ impl ServerRuntime {
         };
         self.maybe_assign_provisional_title(params.session_id, &display_input)
             .await;
+        // Capture first user input for title generation and trigger LLM title.
+        // On subsequent turns, retry if previous attempts failed.
+        {
+            let mut session = session_arc.lock().await;
+            if session.first_user_input.is_none() {
+                session.first_user_input = Some(display_input.clone());
+            }
+        }
+        let needs_title = {
+            let session = session_arc.lock().await;
+            let first_input = session.first_user_input.clone();
+            let needs = matches!(
+                session.summary.title_state,
+                SessionTitleState::Unset | SessionTitleState::Provisional
+            );
+            (needs, first_input)
+        };
+        if needs_title.0
+            && let Some(first_input) = needs_title.1
+        {
+            let runtime = Arc::clone(self);
+            let sid = params.session_id;
+            tokio::spawn(async move {
+                runtime.maybe_generate_final_title(sid, first_input).await;
+            });
+        }
         let (record, session_context, turn_context) = {
             let session = session_arc.lock().await;
             let core_session = session.core_session.lock().await;
@@ -1310,7 +1411,7 @@ impl ServerRuntime {
     }
 
     async fn handle_turn_interrupt(
-        &self,
+        self: &Arc<Self>,
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
@@ -1414,6 +1515,16 @@ impl ServerRuntime {
         ))
         .await;
 
+        // After interrupting the current turn, drain the steering queue and
+        // start the next turn. Without this, queued inputs would be orphaned
+        // because the aborted execute_turn task never reaches its end-of-turn
+        // drain logic.
+        let runtime = Arc::clone(self);
+        let sid = params.session_id;
+        tokio::spawn(async move {
+            runtime.spawn_next_turn_from_queue(sid).await;
+        });
+
         serde_json::to_value(SuccessResponse {
             id: request_id,
             result: TurnInterruptResult {
@@ -1477,10 +1588,18 @@ impl ServerRuntime {
                     "active turn did not match expectedTurnId",
                 );
             }
+            let active_turn = session.active_turn.as_ref().expect("active turn exists");
+            if active_turn.kind != devo_core::TurnKind::Regular {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::ActiveTurnNotSteerable,
+                    "cannot steer a non-regular turn",
+                );
+            }
             (
                 turn_id,
                 session.summary.cwd.clone(),
-                Arc::clone(&session.steering_queue),
+                Arc::clone(&session.steer_input_queue),
             )
         };
         let prompt_text = match self
@@ -1528,7 +1647,11 @@ impl ServerRuntime {
         steering_queue
             .lock()
             .expect("steering queue mutex should not be poisoned")
-            .push_back(prompt_text);
+            .push_back(devo_core::PendingInputItem {
+                kind: devo_core::PendingInputKind::UserText { text: prompt_text },
+                metadata: None,
+                created_at: chrono::Utc::now(),
+            });
 
         self.emit_to_connection(
             connection_id,
@@ -1763,6 +1886,7 @@ impl ServerRuntime {
                         tool_use_id,
                         content,
                         is_error,
+                        summary,
                     } => {
                         let tool_name = tool_names_by_id.get(&tool_use_id).cloned();
                         // First complete the pending ToolCall item so its item/completed
@@ -1808,9 +1932,35 @@ impl ServerRuntime {
                                     tool_name,
                                     content: serde_json::Value::String(content),
                                     is_error,
+                                    summary,
                                 })
                                 .expect("serialize tool result payload"),
                             )
+                            .await;
+                    }
+                    QueryEvent::ToolProgress {
+                        tool_use_id,
+                        content,
+                    } => {
+                        let _ = runtime
+                            .broadcast_event(ServerEvent::ItemDelta {
+                                delta_kind: ItemDeltaKind::CommandExecutionOutputDelta,
+                                payload: ItemDeltaPayload {
+                                    context: EventContext {
+                                        session_id,
+                                        turn_id: Some(turn_for_events.turn_id),
+                                        item_id: None,
+                                        seq: 0,
+                                    },
+                                    delta: serde_json::json!({
+                                        "tool_use_id": tool_use_id,
+                                        "text": content,
+                                    })
+                                    .to_string(),
+                                    stream_index: None,
+                                    channel: None,
+                                },
+                            })
                             .await;
                     }
                     QueryEvent::UsageDelta {
@@ -1905,7 +2055,6 @@ impl ServerRuntime {
 
         let (
             result,
-            first_assistant_reply,
             session_total_input_tokens,
             session_total_output_tokens,
             session_prompt_token_estimate,
@@ -1921,33 +2070,18 @@ impl ServerRuntime {
                 let _ = event_callback_tx.send(event);
             });
             let registry = Arc::clone(&self.deps.registry);
-            let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+            let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
             let result = query(
                 &mut core_session,
                 &turn_config,
                 self.deps.provider.clone(),
                 registry,
-                &orchestrator,
+                &runtime,
                 Some(callback),
             )
             .await;
-            let first_assistant_reply = core_session.messages.iter().find_map(|message| {
-                if !matches!(message.role, devo_core::Role::Assistant) {
-                    return None;
-                }
-                let text = message
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        devo_core::ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<String>();
-                (!text.trim().is_empty()).then_some(text)
-            });
             (
                 result,
-                first_assistant_reply,
                 core_session.total_input_tokens,
                 core_session.total_output_tokens,
                 core_session.prompt_token_estimate,
@@ -1994,22 +2128,6 @@ impl ServerRuntime {
         {
             tracing::warn!(session_id = %session_id, error = %error, "failed to persist terminal turn line");
         }
-        if final_turn.status == TurnStatus::Completed
-            && let Some(first_assistant_reply) = first_assistant_reply
-        {
-            let runtime = Arc::clone(&self);
-            let input_for_title = display_input.clone();
-            tokio::spawn(async move {
-                runtime
-                    .maybe_generate_final_title(
-                        session_id,
-                        &input_for_title,
-                        &first_assistant_reply,
-                    )
-                    .await;
-            });
-        }
-
         if let Err(error) = result {
             tracing::warn!(
                 session_id = %session_id,
@@ -2053,6 +2171,228 @@ impl ServerRuntime {
             SessionStatusChangedPayload {
                 session_id,
                 status: SessionRuntimeStatus::Idle,
+            },
+        ))
+        .await;
+
+        // After the turn completes, check for queued inputs and start the next turn.
+        let input_text = {
+            let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
+                Some(s) => s,
+                None => return,
+            };
+            let steering_queue = {
+                let session = session_arc.lock().await;
+                if session.active_turn.is_some() {
+                    return;
+                }
+                Arc::clone(&session.steering_queue)
+            };
+            let mut queue = steering_queue
+                .lock()
+                .expect("steering queue mutex should not be poisoned");
+            match queue.pop_front() {
+                Some(devo_core::PendingInputItem {
+                    kind: devo_core::PendingInputKind::UserText { text },
+                    ..
+                }) => text,
+                _ => return,
+            }
+        };
+        let display_input = input_text.clone();
+        // Broadcast remaining queue state so the TUI preview stays in sync.
+        self.broadcast_updated_queue(session_id).await;
+
+        let (turn_config, resolved_request) = {
+            let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
+                Some(s) => s,
+                None => return,
+            };
+            let session = session_arc.lock().await;
+            let model_override = session.summary.model.as_deref();
+            let thinking_override = session.summary.thinking.clone();
+            let turn_config = self
+                .deps
+                .resolve_turn_config(model_override, thinking_override);
+            let resolved_request = turn_config
+                .model
+                .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
+            (turn_config, resolved_request)
+        };
+
+        let sequence = {
+            let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
+                Some(s) => s,
+                None => return,
+            };
+            let session = session_arc.lock().await;
+            session.latest_turn.as_ref().map_or(1, |t| t.sequence + 1)
+        };
+
+        let now = Utc::now();
+        let turn = TurnMetadata {
+            turn_id: TurnId::new(),
+            session_id,
+            sequence,
+            status: TurnStatus::Running,
+            kind: devo_core::TurnKind::Regular,
+            model: turn_config.model.slug.clone(),
+            thinking: turn_config.thinking_selection.clone(),
+            request_model: resolved_request.request_model.clone(),
+            request_thinking: resolved_request.request_thinking.clone(),
+            started_at: now,
+            completed_at: None,
+            usage: None,
+        };
+        {
+            let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
+                Some(s) => s,
+                None => return,
+            };
+            let mut session = session_arc.lock().await;
+            session.summary.status = SessionRuntimeStatus::ActiveTurn;
+            session.summary.updated_at = now;
+            session.active_turn = Some(turn.clone());
+        }
+        self.broadcast_event(ServerEvent::TurnStarted(TurnEventPayload {
+            session_id,
+            turn: turn.clone(),
+        }))
+        .await;
+        // Chain the next turn directly (not spawned) so it runs after the
+        // current turn completes, and calls back into this drain logic.
+        Box::pin(Arc::clone(&self).execute_turn(
+            session_id,
+            turn,
+            turn_config,
+            display_input,
+            input_text,
+        ))
+        .await;
+    }
+
+    /// Pop the first queued input and start a new turn in a background task.
+    /// Used from the interrupt handler where the calling function must return
+    /// its response immediately.
+    async fn spawn_next_turn_from_queue(self: &Arc<Self>, session_id: SessionId) {
+        // Pop one queued input.
+        let (display_input, input_text) = {
+            let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
+                Some(s) => s,
+                None => return,
+            };
+            let steering_queue = {
+                let session = session_arc.lock().await;
+                Arc::clone(&session.steering_queue)
+            };
+            let mut guard = steering_queue
+                .lock()
+                .expect("steering queue mutex should not be poisoned");
+            match guard.pop_front() {
+                Some(devo_core::PendingInputItem {
+                    kind: devo_core::PendingInputKind::UserText { text },
+                    ..
+                }) => (text.clone(), text),
+                _ => return,
+            }
+        };
+        // Broadcast the updated queue state so the TUI removes this item
+        // from its pending cells list.
+        self.broadcast_updated_queue(session_id).await;
+
+        // Resolve turn config from session metadata.
+        let (turn_config, resolved_request) = {
+            let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
+                Some(s) => s,
+                None => return,
+            };
+            let session = session_arc.lock().await;
+            let model = session.summary.model.as_deref();
+            let thinking = session.summary.thinking.clone();
+            let tc = self.deps.resolve_turn_config(model, thinking);
+            let rr = tc
+                .model
+                .resolve_thinking_selection(tc.thinking_selection.as_deref());
+            (tc, rr)
+        };
+
+        let sequence = {
+            let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
+                Some(s) => s,
+                None => return,
+            };
+            let session = session_arc.lock().await;
+            session.latest_turn.as_ref().map_or(1, |t| t.sequence + 1)
+        };
+
+        let now = Utc::now();
+        let turn = TurnMetadata {
+            turn_id: TurnId::new(),
+            session_id,
+            sequence,
+            status: TurnStatus::Running,
+            kind: devo_core::TurnKind::Regular,
+            model: turn_config.model.slug.clone(),
+            thinking: turn_config.thinking_selection.clone(),
+            request_model: resolved_request.request_model.clone(),
+            request_thinking: resolved_request.request_thinking.clone(),
+            started_at: now,
+            completed_at: None,
+            usage: None,
+        };
+        {
+            let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
+                Some(s) => s,
+                None => return,
+            };
+            let mut session = session_arc.lock().await;
+            session.summary.status = SessionRuntimeStatus::ActiveTurn;
+            session.summary.updated_at = now;
+            session.active_turn = Some(turn.clone());
+        }
+        self.broadcast_event(ServerEvent::TurnStarted(TurnEventPayload {
+            session_id,
+            turn: turn.clone(),
+        }))
+        .await;
+        // Spawn the turn in the background so the caller (interrupt handler)
+        // can return its response immediately. The spawned task will call
+        // drain_and_start_next_turn on completion, draining the entire queue.
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            runtime
+                .execute_turn(session_id, turn, turn_config, display_input, input_text)
+                .await;
+        });
+    }
+
+    /// Read the current steering queue and broadcast its state to connected clients.
+    /// Called after any queue mutation (enqueue, dequeue, clear) so the TUI preview
+    /// stays in sync.
+    async fn broadcast_updated_queue(&self, session_id: SessionId) {
+        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+            return;
+        };
+        let (pending_count, pending_texts) = {
+            let session = session_arc.lock().await;
+            let queue = session
+                .steering_queue
+                .lock()
+                .expect("steering queue mutex should not be poisoned");
+            let texts: Vec<String> = queue
+                .iter()
+                .filter_map(|item| match &item.kind {
+                    devo_core::PendingInputKind::UserText { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect();
+            (texts.len(), texts)
+        };
+        self.broadcast_event(ServerEvent::InputQueueUpdated(
+            devo_core::InputQueueUpdatedPayload {
+                session_id,
+                pending_count,
+                pending_texts,
             },
         ))
         .await;
@@ -2102,99 +2442,104 @@ impl ServerRuntime {
         .await;
     }
 
+    /// Attempts to generate a final session title by calling the LLM.
+    /// Retries up to MAX_TITLE_RETRIES times with exponential backoff.
+    /// Exhausting retries leaves the title at `Provisional`; the caller
+    /// should re-trigger on the next user message.
+    const MAX_TITLE_RETRIES: usize = 5;
+    const TITLE_RETRY_BASE_DELAY_SECS: u64 = 1;
+
     async fn maybe_generate_final_title(
         self: Arc<Self>,
         session_id: SessionId,
-        first_user_input: &str,
-        first_assistant_reply: &str,
+        first_user_input: String,
     ) {
-        let (model, title_state) = {
+        for attempt in 1..=Self::MAX_TITLE_RETRIES {
+            let (model, should_skip) = {
+                let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+                    return;
+                };
+                let session = session_arc.lock().await;
+                (
+                    session
+                        .summary
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| self.deps.default_model.clone()),
+                    matches!(session.summary.title_state, SessionTitleState::Final(_)),
+                )
+            };
+
+            if should_skip {
+                return;
+            }
+
+            let response = match self
+                .deps
+                .provider
+                .completion(build_title_generation_request(model, &first_user_input))
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(session_id = %session_id, attempt, error = %error, "title gen failed");
+                    if attempt < Self::MAX_TITLE_RETRIES {
+                        let delay = Self::TITLE_RETRY_BASE_DELAY_SECS * (1u64 << (attempt - 1));
+                        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    }
+                    continue;
+                }
+            };
+
+            let Some(generated_title) = normalize_generated_title(&response.content) else {
+                tracing::warn!(session_id = %session_id, attempt, "title gen returned no valid title");
+                if attempt < Self::MAX_TITLE_RETRIES {
+                    let delay = Self::TITLE_RETRY_BASE_DELAY_SECS * (1u64 << (attempt - 1));
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                }
+                continue;
+            };
+
             let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
                 return;
             };
-            let session = session_arc.lock().await;
-            (
-                session
-                    .summary
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| self.deps.default_model.clone()),
-                session.summary.title_state.clone(),
-            )
-        };
+            let updated_summary = {
+                let mut session = session_arc.lock().await;
+                if matches!(session.summary.title_state, SessionTitleState::Final(_)) {
+                    return;
+                }
 
-        if matches!(
-            title_state,
-            SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate)
-                | SessionTitleState::Final(SessionTitleFinalSource::UserRename)
-                | SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated)
-        ) {
+                let previous_title = session.summary.title.clone();
+                let updated_at = Utc::now();
+                session.summary.title = Some(generated_title.clone());
+                session.summary.title_state =
+                    SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated);
+                session.summary.updated_at = updated_at;
+
+                if let Some(record) = session.record.as_mut() {
+                    record.title = Some(generated_title.clone());
+                    record.title_state =
+                        SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated);
+                    record.updated_at = updated_at;
+                    if let Err(error) = self.rollout_store.append_title_update(
+                        record,
+                        generated_title.clone(),
+                        record.title_state.clone(),
+                        previous_title,
+                    ) {
+                        tracing::warn!(session_id = %session_id, error = %error, "failed to persist title");
+                    }
+                }
+                session.summary.clone()
+            };
+
+            self.broadcast_event(ServerEvent::SessionTitleUpdated(SessionEventPayload {
+                session: updated_summary,
+            }))
+            .await;
             return;
         }
-
-        let response = match self
-            .deps
-            .provider
-            .completion(build_title_generation_request(
-                model,
-                first_user_input,
-                first_assistant_reply,
-            ))
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::warn!(session_id = %session_id, error = %error, "title generation request failed");
-                return;
-            }
-        };
-        let Some(generated_title) = normalize_generated_title(&response.content) else {
-            tracing::warn!(session_id = %session_id, "title generation returned no valid title");
-            return;
-        };
-
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
-            return;
-        };
-        let updated_summary = {
-            let mut session = session_arc.lock().await;
-            if matches!(
-                session.summary.title_state,
-                SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate)
-                    | SessionTitleState::Final(SessionTitleFinalSource::UserRename)
-                    | SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated)
-            ) {
-                return;
-            }
-
-            let previous_title = session.summary.title.clone();
-            let updated_at = Utc::now();
-            session.summary.title = Some(generated_title.clone());
-            session.summary.title_state =
-                SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated);
-            session.summary.updated_at = updated_at;
-
-            if let Some(record) = session.record.as_mut() {
-                record.title = Some(generated_title.clone());
-                record.title_state =
-                    SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated);
-                record.updated_at = updated_at;
-                if let Err(error) = self.rollout_store.append_title_update(
-                    record,
-                    generated_title.clone(),
-                    record.title_state.clone(),
-                    previous_title,
-                ) {
-                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist generated title");
-                }
-            }
-            session.summary.clone()
-        };
-
-        self.broadcast_event(ServerEvent::SessionTitleUpdated(SessionEventPayload {
-            session: updated_summary,
-        }))
-        .await;
+        tracing::warn!(session_id = %session_id, "title generation exhausted all retries");
     }
 
     async fn emit_text_item(

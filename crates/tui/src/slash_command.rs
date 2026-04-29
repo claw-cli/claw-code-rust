@@ -11,6 +11,7 @@ pub enum SlashCommand {
     Onboard,
     Diff,
     Exit,
+    Btw,
 }
 
 impl SlashCommand {
@@ -25,6 +26,7 @@ impl SlashCommand {
             SlashCommand::Clear => "clear the current transcript",
             SlashCommand::Onboard => "configure model provider connection",
             SlashCommand::Diff => "show git diff (including untracked files)",
+            SlashCommand::Btw => "inject text into the current turn immediately",
             SlashCommand::Exit => "exit Devo",
         }
     }
@@ -40,12 +42,13 @@ impl SlashCommand {
             SlashCommand::Clear => "clear",
             SlashCommand::Onboard => "onboard",
             SlashCommand::Diff => "diff",
+            SlashCommand::Btw => "btw",
             SlashCommand::Exit => "exit",
         }
     }
 
     pub fn supports_inline_args(self) -> bool {
-        matches!(self, SlashCommand::Model)
+        matches!(self, SlashCommand::Model | SlashCommand::Btw)
     }
 
     pub fn available_during_task(self) -> bool {
@@ -67,6 +70,7 @@ impl std::str::FromStr for SlashCommand {
             "clear" => Ok(Self::Clear),
             "onboard" => Ok(Self::Onboard),
             "diff" => Ok(Self::Diff),
+            "btw" => Ok(Self::Btw),
             "exit" => Ok(Self::Exit),
             _ => Err(()),
         }
@@ -84,6 +88,7 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
         ("clear", SlashCommand::Clear),
         ("onboard", SlashCommand::Onboard),
         ("diff", SlashCommand::Diff),
+        ("btw", SlashCommand::Btw),
         ("exit", SlashCommand::Exit),
     ]
 }

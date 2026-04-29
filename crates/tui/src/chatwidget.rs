@@ -36,6 +36,8 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
 
+use devo_protocol::TurnId;
+
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
@@ -223,6 +225,8 @@ pub(crate) struct ChatWidget {
     total_input_tokens: usize,
     total_output_tokens: usize,
     prompt_token_estimate: usize,
+    queued_count: usize,
+    active_turn_id: Option<TurnId>,
     busy: bool,
 }
 
@@ -335,6 +339,31 @@ impl ChatWidget {
         Some((used, usable, total))
     }
 
+    fn format_compact_token_count(value: usize) -> String {
+        if value >= 1_000_000 {
+            format!("{:.1}M", value as f64 / 1_000_000.0)
+        } else if value >= 1_000 {
+            format!("{:.0}k", value as f64 / 1_000.0)
+        } else {
+            value.to_string()
+        }
+    }
+
+    fn render_progress_bar(used: usize, total: usize, bar_width: usize) -> String {
+        if total == 0 {
+            return String::new();
+        }
+        let ratio = (used as f64 / total as f64).clamp(0.0, 1.0);
+        let filled = (ratio * bar_width as f64).round() as usize;
+        let empty = bar_width.saturating_sub(filled);
+        let bar: String = std::iter::repeat('█')
+            .take(filled)
+            .chain(std::iter::repeat('░').take(empty))
+            .collect();
+        let pct = (ratio * 100.0).round() as usize;
+        format!("{bar} {pct}% ({})", Self::format_compact_token_count(used))
+    }
+
     fn session_summary_text(&self) -> String {
         let model = self
             .session
@@ -344,21 +373,21 @@ impl ChatWidget {
             .unwrap_or("unknown");
         let thinking = self.thinking_selection.as_deref().unwrap_or("default");
         let context = self.context_budget().map_or_else(
-            || "context n/a".to_string(),
-            |(used, usable, total)| {
-                format!(
-                    "context {} / {} usable ({} total)",
-                    Self::format_token_count(used),
-                    Self::format_token_count(usable),
-                    Self::format_token_count(total)
-                )
-            },
+            || String::new(),
+            |(used, usable, _total)| Self::render_progress_bar(used, usable, 10),
         );
 
-        format!(
-            "{model} | thinking {thinking} | tokens {} in / {} out | {context}",
-            self.total_input_tokens, self.total_output_tokens
-        )
+        let mut parts: Vec<String> = Vec::new();
+        parts.push(format!("{model} {thinking}"));
+        parts.push(format!(
+            "\u{2191}{} \u{2193}{}",
+            Self::format_compact_token_count(self.total_input_tokens),
+            Self::format_compact_token_count(self.total_output_tokens)
+        ));
+        if !context.is_empty() {
+            parts.push(context);
+        }
+        parts.join("  ")
     }
 
     fn sync_bottom_pane_summary(&mut self) {
@@ -408,8 +437,8 @@ impl ChatWidget {
         );
 
         let loaded_any_history = !history_items.is_empty();
-        for item in history_items {
-            self.add_transcript_item_without_redraw(item);
+        for item in &history_items {
+            self.add_transcript_item_without_redraw(item.clone());
         }
         if !loaded_any_history {
             self.add_history_entry_without_redraw(Box::new(history_cell::new_info_event(
@@ -528,6 +557,8 @@ impl ChatWidget {
             total_input_tokens: 0,
             total_output_tokens: 0,
             prompt_token_estimate: 0,
+            queued_count: 0,
+            active_turn_id: None,
             busy: false,
         };
 
@@ -556,14 +587,30 @@ impl ChatWidget {
                 local_images,
                 mention_bindings,
             } => {
-                let user_message = UserMessage {
-                    text,
-                    local_images,
-                    remote_image_urls: Vec::new(),
-                    text_elements,
-                    mention_bindings,
-                };
-                self.submit_user_message(user_message);
+                if self.busy && !text.trim().is_empty() {
+                    // Turn is active — show in bottom pane as pending cell.
+                    self.bottom_pane.push_pending_cell(text.clone());
+                    self.queued_count += 1;
+                    self.app_event_tx
+                        .send(AppEvent::Command(AppCommand::user_turn(
+                            vec![devo_protocol::InputItem::Text { text }],
+                            Some(self.session.cwd.clone()),
+                            self.session.model.as_ref().map(|m| m.slug.clone()),
+                            self.thinking_selection.clone(),
+                            /*sandbox*/ None,
+                            /*approval_policy*/ None,
+                        )));
+                    self.set_status_message("Message queued");
+                } else {
+                    let user_message = UserMessage {
+                        text,
+                        local_images,
+                        remote_image_urls: Vec::new(),
+                        text_elements,
+                        mention_bindings,
+                    };
+                    self.submit_user_message(user_message);
+                }
             }
             InputResult::Command { command, argument } => {
                 self.handle_slash_command(command, argument);
@@ -652,7 +699,13 @@ impl ChatWidget {
 
     pub(crate) fn handle_worker_event(&mut self, event: WorkerEvent) {
         match event {
-            WorkerEvent::TurnStarted { model, thinking } => {
+            WorkerEvent::TurnStarted {
+                model,
+                thinking,
+                turn_id,
+                ..
+            } => {
+                self.active_turn_id = Some(turn_id);
                 self.update_session_request_model(model);
                 self.thinking_selection = thinking;
                 self.refresh_header_box();
@@ -692,9 +745,13 @@ impl ChatWidget {
             } => {
                 // Do not commit active streams here — pending tool calls share the
                 // active viewport alongside reasoning/assistant text.
-                let message = detail
-                    .map(|detail| format!("{summary}\n{detail}"))
-                    .unwrap_or(summary);
+                // If summary already has a key detail (e.g. "read: src/main.rs"),
+                // skip the redundant JSON preview.
+                let message = if summary.contains(": ") {
+                    summary
+                } else {
+                    detail.unwrap_or_else(|| summary.clone())
+                };
                 let tool_call = ActiveToolCall {
                     tool_use_id: tool_use_id.clone(),
                     lines: vec![Line::from(message).patch_style(Self::tool_text_style())],
@@ -704,6 +761,24 @@ impl ChatWidget {
                 self.pending_tool_calls.push(tool_call);
                 self.frame_requester.schedule_frame();
                 self.set_status_message("Tool started");
+            }
+            WorkerEvent::ToolOutputDelta { tool_use_id, delta } => {
+                // Append streaming output to the active tool call lines
+                if let Some(tool_call) = self.active_tool_calls.get_mut(&tool_use_id) {
+                    let line = Line::from(delta.clone()).patch_style(Self::tool_text_style());
+                    tool_call.lines.push(line);
+                    // Also update the pending viewport entry
+                    if let Some(pending) = self
+                        .pending_tool_calls
+                        .iter_mut()
+                        .find(|tc| tc.tool_use_id == tool_use_id)
+                    {
+                        pending
+                            .lines
+                            .push(Line::from(delta).patch_style(Self::tool_text_style()));
+                    }
+                    self.frame_requester.schedule_frame();
+                }
             }
             WorkerEvent::ToolResult {
                 tool_use_id,
@@ -791,8 +866,21 @@ impl ChatWidget {
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
+                let elapsed = self
+                    .bottom_pane
+                    .status_widget()
+                    .map(|s| s.elapsed_seconds())
+                    .filter(|&secs| secs > 0);
+                let model_name = self
+                    .session
+                    .model
+                    .as_ref()
+                    .map(|m| m.display_name.clone())
+                    .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
+                    .unwrap_or_default();
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Ready");
+                self.add_to_history(history_cell::TurnSummaryCell::new(model_name, elapsed));
             }
             WorkerEvent::TurnFailed {
                 message,
@@ -958,6 +1046,16 @@ impl ChatWidget {
             WorkerEvent::InputHistoryLoaded { direction: _, text } => {
                 self.bottom_pane.restore_input_from_history(text);
             }
+            WorkerEvent::InputQueueUpdated { pending_count, .. } => {
+                // If the queue shrunk, unqueue the oldest queued cells.
+                while self.queued_count > pending_count {
+                    self.unqueue_oldest_pending();
+                }
+                self.frame_requester.schedule_frame();
+            }
+            WorkerEvent::SteerAccepted { .. } => {
+                self.set_status_message("Steer accepted");
+            }
         }
     }
 
@@ -1080,6 +1178,18 @@ impl ChatWidget {
                         command: "session list".to_string(),
                     }));
                 self.set_status_message("Loading sessions");
+            }
+            SlashCommand::Btw => {
+                if let Some(turn_id) = self.active_turn_id {
+                    self.app_event_tx
+                        .send(AppEvent::Command(AppCommand::SteerTurn {
+                            input: vec![devo_protocol::InputItem::Text { text: argument }],
+                            expected_turn_id: turn_id,
+                        }));
+                    self.set_status_message("Steer sent");
+                } else {
+                    self.set_status_message("No active turn to steer");
+                }
             }
             SlashCommand::Diff => {
                 self.set_status_message("Computing diff");
@@ -1409,17 +1519,21 @@ impl ChatWidget {
     }
 
     fn commit_active_streams(&mut self, status: DotStatus) {
-        if !self.active_reasoning_text.trim().is_empty() {
-            let reasoning_text = std::mem::take(&mut self.active_reasoning_text);
+        // Take the text first so any buffered delta events that arrive after
+        // this call will not re-create the active reasoning/assistant cells
+        // with stale content.
+        let reasoning_text = std::mem::take(&mut self.active_reasoning_text);
+        let assistant_text = std::mem::take(&mut self.active_assistant_text);
+        self.active_reasoning_cell = None;
+        self.active_assistant_cell = None;
+        self.stream_controller = None;
+
+        if !reasoning_text.trim().is_empty() {
             self.add_markdown_history_with_status("Reasoning", &reasoning_text, status);
         }
-        self.active_reasoning_cell = None;
-        self.finalize_assistant_stream();
-        if !self.active_assistant_text.trim().is_empty() {
-            let text = std::mem::take(&mut self.active_assistant_text);
-            self.add_markdown_history_with_status("Assistant", &text, status);
+        if !assistant_text.trim().is_empty() {
+            self.add_markdown_history_with_status("Assistant", &assistant_text, status);
         }
-        self.active_assistant_cell = None;
     }
 
     fn push_assistant_stream_delta(&mut self, text: &str) {
@@ -1676,6 +1790,20 @@ impl ChatWidget {
     pub(crate) fn add_to_history(&mut self, cell: impl HistoryCell + 'static) {
         self.add_history_entry_without_redraw(Box::new(cell));
         self.frame_requester.schedule_frame();
+    }
+
+    /// Pop the oldest pending cell from the bottom pane and add it to history
+    /// as a normal user input cell.
+    fn unqueue_oldest_pending(&mut self) {
+        if let Some(text) = self.bottom_pane.pop_oldest_pending_cell() {
+            self.add_to_history(history_cell::new_user_prompt(
+                text,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ));
+            self.queued_count = self.queued_count.saturating_sub(1);
+        }
     }
 
     fn add_history_entry_without_redraw(&mut self, cell: Box<dyn HistoryCell>) {

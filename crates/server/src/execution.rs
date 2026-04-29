@@ -21,6 +21,7 @@ use devo_core::SkillId;
 use devo_core::TurnConfig;
 use devo_core::default_base_instructions;
 use devo_core::normalize_canonical_path;
+use devo_protocol::PendingInputItem;
 use devo_provider::ModelProviderSDK;
 use devo_tools::ToolRegistry;
 
@@ -225,12 +226,17 @@ pub(crate) struct RuntimeSession {
     pub(crate) persisted_turn_items: Vec<PersistedTurnItem>,
     /// Latest compaction snapshot used to rebuild the model-facing prompt view.
     pub(crate) latest_compaction_snapshot: Option<devo_core::CompactionSnapshotLine>,
-    /// Pending same-turn steering inputs.
-    pub(crate) steering_queue: Arc<StdMutex<VecDeque<String>>>,
+    /// Pending same-turn steering inputs (from busy turn/start).
+    pub(crate) steering_queue: Arc<StdMutex<VecDeque<PendingInputItem>>>,
+    /// /btw steer inputs scoped to the current turn. These are drained by the
+    /// query loop at each iteration and never carried to the next turn.
+    pub(crate) steer_input_queue: Arc<StdMutex<VecDeque<PendingInputItem>>>,
     /// Live query task for the active turn.
     pub(crate) active_task: Option<JoinHandle<()>>,
     /// Monotonic session-scoped item sequence counter.
     pub(crate) next_item_seq: u64,
+    /// First user input captured from the session's first turn, used for title generation.
+    pub(crate) first_user_input: Option<String>,
 }
 
 impl RuntimeSession {

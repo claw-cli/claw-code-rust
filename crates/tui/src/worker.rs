@@ -41,6 +41,7 @@ use devo_server::ToolResultPayload;
 use devo_server::TurnEventPayload;
 use devo_server::TurnInterruptParams;
 use devo_server::TurnStartParams;
+use devo_server::TurnSteerParams;
 
 use crate::app_command::InputHistoryDirection;
 use crate::events::SessionListEntry;
@@ -111,6 +112,11 @@ enum OperationCommand {
     RenameSession(String),
     /// Interrupt the active turn when one is running.
     InterruptTurn,
+    /// Steer text into the currently active turn.
+    SteerTurn {
+        input: Vec<InputItem>,
+        expected_turn_id: TurnId,
+    },
     /// Browse persisted input history via the server/runtime session state.
     BrowseInputHistory(InputHistoryDirection),
     /// Stop the worker loop.
@@ -243,6 +249,16 @@ impl QueryWorkerHandle {
     pub(crate) fn interrupt_turn(&self) -> Result<()> {
         self.command_tx
             .send(OperationCommand::InterruptTurn)
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    /// Steer text into the currently active turn.
+    pub(crate) fn submit_steer(&self, text: String, expected_turn_id: TurnId) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::SteerTurn {
+                input: vec![devo_server::InputItem::Text { text }],
+                expected_turn_id,
+            })
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
@@ -676,6 +692,36 @@ async fn run_worker_inner(
                                 });
                             }
                     }
+                    Some(OperationCommand::SteerTurn {
+                        input,
+                        expected_turn_id,
+                    }) => {
+                        if let Some(active_session_id) = session_id {
+                            match client
+                                .turn_steer(TurnSteerParams {
+                                    session_id: active_session_id,
+                                    expected_turn_id,
+                                    input,
+                                })
+                                .await
+                            {
+                                Ok(result) => {
+                                    let _ = event_tx.send(WorkerEvent::SteerAccepted {
+                                        turn_id: result.turn_id,
+                                    });
+                                }
+                                Err(error) => {
+                                    let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                        message: error.to_string(),
+                                        turn_count,
+                                        total_input_tokens,
+                                        total_output_tokens,
+                                        prompt_token_estimate: total_input_tokens,
+                                    });
+                                }
+                            }
+                        }
+                    }
                     Some(OperationCommand::BrowseInputHistory(direction)) => {
                         let text = if let Some(active_session_id) = session_id {
                             match client
@@ -754,6 +800,7 @@ async fn run_worker_inner(
                                     let _ = event_tx.send(WorkerEvent::TurnStarted {
                                         model: payload.turn.model,
                                         thinking: payload.turn.thinking,
+                                        turn_id: payload.turn.turn_id,
                                     });
                                 }
                                 latest_completed_agent_message = None;
@@ -775,6 +822,27 @@ async fn run_worker_inner(
                             "item/agentMessage/delta" => {
                                 if let ServerEvent::ItemDelta { payload, .. } = event {
                                     let _ = event_tx.send(WorkerEvent::TextDelta(payload.delta));
+                                }
+                            }
+                            "item/commandExecution/outputDelta" => {
+                                if let ServerEvent::ItemDelta { payload, .. } = event {
+                                    let delta_str = &payload.delta;
+                                    if let Ok(val) =
+                                        serde_json::from_str::<serde_json::Value>(delta_str)
+                                    {
+                                        let tool_use_id = val
+                                            .get("tool_use_id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        let text =
+                                            val.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                                        if !tool_use_id.is_empty() {
+                                            let _ = event_tx.send(WorkerEvent::ToolOutputDelta {
+                                                tool_use_id: tool_use_id.to_string(),
+                                                delta: text.to_string(),
+                                            });
+                                        }
+                                    }
                                 }
                             }
                             "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
@@ -849,6 +917,14 @@ async fn run_worker_inner(
                                             .as_ref()
                                             .map(|usage| usage.input_tokens as usize)
                                             .unwrap_or(total_input_tokens),
+                                    });
+                                }
+                            }
+                            "inputQueue/updated" => {
+                                if let ServerEvent::InputQueueUpdated(payload) = event {
+                                    let _ = event_tx.send(WorkerEvent::InputQueueUpdated {
+                                        pending_count: payload.pending_count,
+                                        pending_texts: payload.pending_texts,
                                     });
                                 }
                             }
@@ -1037,9 +1113,14 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
             let Ok(payload) = serde_json::from_value::<ToolResultPayload>(payload) else {
                 return;
             };
+            let title = if payload.summary.is_empty() {
+                summarize_tool_result_title(payload.tool_name.as_deref(), payload.is_error)
+            } else {
+                payload.summary
+            };
             let _ = event_tx.send(WorkerEvent::ToolResult {
                 tool_use_id: payload.tool_call_id,
-                title: summarize_tool_result_title(payload.tool_name.as_deref(), payload.is_error),
+                title,
                 preview: render_json_value_text(&payload.content),
                 is_error: payload.is_error,
                 truncated: false,
@@ -1078,11 +1159,15 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
         {
             let result_item = &items[result_index];
             consumed_result_indexes.insert(result_index, ());
-            transcript.push(if result_item.kind == SessionHistoryItemKind::Error {
+            let mut ti = if result_item.kind == SessionHistoryItemKind::Error {
                 TranscriptItem::tool_error(item.title.clone(), result_item.body.clone())
             } else {
                 TranscriptItem::restored_tool_result(item.title.clone(), result_item.body.clone())
-            });
+            };
+            if let Some(duration_ms) = result_item.duration_ms {
+                ti = ti.with_duration(duration_ms);
+            }
+            transcript.push(ti);
             index += 1;
             continue;
         }
@@ -1100,7 +1185,7 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
             SessionHistoryItemKind::ToolResult => TranscriptItemKind::ToolResult,
             SessionHistoryItemKind::Error => TranscriptItemKind::Error,
         };
-        let transcript_item = match item.kind {
+        let mut transcript_item = match item.kind {
             SessionHistoryItemKind::ToolCall => TranscriptItem::tool_call(item.title.clone()),
             SessionHistoryItemKind::ToolResult => {
                 TranscriptItem::restored_tool_result(item.title.clone(), item.body.clone())
@@ -1114,6 +1199,9 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
                 TranscriptItem::new(kind, item.title.clone(), item.body.clone())
             }
         };
+        if let Some(duration_ms) = item.duration_ms {
+            transcript_item = transcript_item.with_duration(duration_ms);
+        }
         transcript.push(transcript_item);
         index += 1;
     }
@@ -1139,29 +1227,65 @@ fn summarize_tool_call(payload: &ToolCallPayload) -> String {
     }
 }
 
+fn make_path_relative(path: &str) -> String {
+    let p = std::path::PathBuf::from(path);
+    if p.is_absolute() {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(rel) = p.strip_prefix(&cwd) {
+                return rel.to_string_lossy().to_string();
+            }
+        }
+    }
+    path.to_string()
+}
+
+fn fmt_offset_limit(input: &serde_json::Value) -> String {
+    let offset = input.get("offset").and_then(|v| v.as_u64());
+    let limit = input.get("limit").and_then(|v| v.as_u64());
+    match (offset, limit) {
+        (Some(o), Some(l)) => format!(" (offset:{o}, limit:{l})"),
+        (Some(o), None) => format!(" (offset:{o})"),
+        (None, Some(l)) => format!(" (limit:{l})"),
+        (None, None) => String::new(),
+    }
+}
+
 fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
     let candidate = match tool_name {
         "bash" => input
             .get("command")
             .and_then(serde_json::Value::as_str)
-            .or_else(|| input.get("cmd").and_then(serde_json::Value::as_str)),
+            .or_else(|| input.get("cmd").and_then(serde_json::Value::as_str))
+            .map(|s| s.to_string()),
         "read" => input
             .get("filePath")
             .and_then(serde_json::Value::as_str)
-            .or_else(|| input.get("path").and_then(serde_json::Value::as_str)),
+            .or_else(|| input.get("path").and_then(serde_json::Value::as_str))
+            .map(|path| {
+                let rel = make_path_relative(path);
+                let ext = fmt_offset_limit(input);
+                format!("{rel}{ext}")
+            }),
         "write" | "edit" | "apply_patch" => input
             .get("path")
             .and_then(serde_json::Value::as_str)
-            .or_else(|| input.get("filePath").and_then(serde_json::Value::as_str)),
+            .or_else(|| input.get("filePath").and_then(serde_json::Value::as_str))
+            .map(|path| make_path_relative(path)),
         "webfetch" | "websearch" => input
             .get("url")
             .and_then(serde_json::Value::as_str)
-            .or_else(|| input.get("query").and_then(serde_json::Value::as_str)),
+            .map(|s| s.to_string())
+            .or_else(|| {
+                input
+                    .get("query")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|s| s.to_string())
+            }),
         _ => None,
     };
 
     candidate
-        .map(|text| compact_tool_summary(text, 96))
+        .map(|text| compact_tool_summary(&text, 96))
         .unwrap_or_else(|| compact_tool_summary(&render_json_preview(input), 96))
 }
 
@@ -1465,12 +1589,14 @@ mod tests {
                 kind: SessionHistoryItemKind::ToolCall,
                 title: "Ran powershell -Command \"Get-Date\"".to_string(),
                 body: String::new(),
+                duration_ms: None,
             },
             SessionHistoryItem {
                 tool_call_id: Some("call-1".to_string()),
                 kind: SessionHistoryItemKind::ToolResult,
                 title: "Tool output".to_string(),
                 body: "2026-04-09".to_string(),
+                duration_ms: None,
             },
         ];
 
@@ -1491,24 +1617,28 @@ mod tests {
                 kind: SessionHistoryItemKind::ToolCall,
                 title: "Ran read a".to_string(),
                 body: String::new(),
+                duration_ms: None,
             },
             SessionHistoryItem {
                 tool_call_id: Some("call-b".to_string()),
                 kind: SessionHistoryItemKind::ToolCall,
                 title: "Ran read b".to_string(),
                 body: String::new(),
+                duration_ms: None,
             },
             SessionHistoryItem {
                 tool_call_id: Some("call-b".to_string()),
                 kind: SessionHistoryItemKind::ToolResult,
                 title: "Tool output".to_string(),
                 body: "B".to_string(),
+                duration_ms: None,
             },
             SessionHistoryItem {
                 tool_call_id: Some("call-a".to_string()),
                 kind: SessionHistoryItemKind::ToolResult,
                 title: "Tool output".to_string(),
                 body: "A".to_string(),
+                duration_ms: None,
             },
         ];
 
@@ -1528,6 +1658,7 @@ mod tests {
             kind: SessionHistoryItemKind::Reasoning,
             title: String::new(),
             body: "thinking aloud".to_string(),
+            duration_ms: None,
         }];
 
         assert_eq!(

@@ -31,6 +31,8 @@ pub struct SavedModelEntry {
     pub api_key: Option<String>,
 }
 
+use devo_protocol::TurnId;
+
 /// One event emitted by the background query worker into the interactive UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkerEvent {
@@ -40,7 +42,16 @@ pub(crate) enum WorkerEvent {
         model: String,
         /// The logical thinking selection used for this turn.
         thinking: Option<String>,
+        /// The server-assigned turn identifier.
+        turn_id: TurnId,
     },
+    /// Input queue state updated by the server.
+    InputQueueUpdated {
+        pending_count: usize,
+        pending_texts: Vec<String>,
+    },
+    /// A steer (/btw) was accepted by the server.
+    SteerAccepted { turn_id: TurnId },
     /// Incremental assistant text.
     TextDelta(String),
     /// Incremental reasoning text.
@@ -57,6 +68,13 @@ pub(crate) enum WorkerEvent {
         summary: String,
         /// Optional structured input preview for the tool call.
         detail: Option<String>,
+    },
+    /// Incremental output delta from a running tool.
+    ToolOutputDelta {
+        /// Stable identifier matching the corresponding tool call.
+        tool_use_id: String,
+        /// Streaming output text chunk.
+        delta: String,
     },
     /// A tool call finished.
     ToolResult {
@@ -208,6 +226,8 @@ pub(crate) struct TranscriptItem {
     pub fold_next_at: Option<Instant>,
     /// Current fold stage for tool outputs.
     pub fold_stage: u8,
+    /// Duration of the turn that produced this item (milliseconds), if known.
+    pub duration_ms: Option<u64>,
 }
 
 impl TranscriptItem {
@@ -223,6 +243,7 @@ impl TranscriptItem {
             body: body.into(),
             fold_next_at: None,
             fold_stage: 0,
+            duration_ms: None,
         }
     }
 
@@ -246,6 +267,12 @@ impl TranscriptItem {
     pub(crate) fn with_fold_stage(mut self, stage: u8) -> Self {
         self.fold_stage = stage;
         self.fold_next_at = None;
+        self
+    }
+
+    /// Attaches turn duration metadata to this transcript item.
+    pub(crate) fn with_duration(mut self, duration_ms: u64) -> Self {
+        self.duration_ms = Some(duration_ms);
         self
     }
 }
