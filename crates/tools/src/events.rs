@@ -62,16 +62,44 @@ mod tests {
             let json = serde_json::to_string(event).unwrap();
             let deserialized: ToolEvent = serde_json::from_str(&json).unwrap();
             match (&event, &deserialized) {
-                (ToolEvent::ToolCallBegin { tool_name, call_id }, ToolEvent::ToolCallBegin { tool_name: tn, call_id: ci }) => {
+                (
+                    ToolEvent::ToolCallBegin { tool_name, call_id },
+                    ToolEvent::ToolCallBegin {
+                        tool_name: tn,
+                        call_id: ci,
+                    },
+                ) => {
                     assert_eq!(tool_name, tn);
                     assert_eq!(call_id, ci);
                 }
-                (ToolEvent::ToolCallEnd { tool_name, call_id, duration_ms }, ToolEvent::ToolCallEnd { tool_name: tn, call_id: ci, duration_ms: d }) => {
+                (
+                    ToolEvent::ToolCallEnd {
+                        tool_name,
+                        call_id,
+                        duration_ms,
+                    },
+                    ToolEvent::ToolCallEnd {
+                        tool_name: tn,
+                        call_id: ci,
+                        duration_ms: d,
+                    },
+                ) => {
                     assert_eq!(tool_name, tn);
                     assert_eq!(call_id, ci);
                     assert_eq!(duration_ms, d);
                 }
-                (ToolEvent::ToolProgress { tool_name, call_id, message }, ToolEvent::ToolProgress { tool_name: tn, call_id: ci, message: m }) => {
+                (
+                    ToolEvent::ToolProgress {
+                        tool_name,
+                        call_id,
+                        message,
+                    },
+                    ToolEvent::ToolProgress {
+                        tool_name: tn,
+                        call_id: ci,
+                        message: m,
+                    },
+                ) => {
                     assert_eq!(tool_name, tn);
                     assert_eq!(call_id, ci);
                     assert_eq!(message, m);

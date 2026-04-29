@@ -122,29 +122,44 @@ mod tests {
     #[test]
     fn string_schema() {
         let s = JsonSchema::string(Some("a name"));
-        assert_eq!(s.schema_type, Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::String)));
+        assert_eq!(
+            s.schema_type,
+            Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::String))
+        );
         assert_eq!(s.description, Some("a name".into()));
     }
 
     #[test]
     fn boolean_schema() {
         let s = JsonSchema::boolean(Some("flag"));
-        assert_eq!(s.schema_type, Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Boolean)));
+        assert_eq!(
+            s.schema_type,
+            Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Boolean))
+        );
         assert_eq!(s.description, Some("flag".into()));
     }
 
     #[test]
     fn integer_number_schema() {
         let i = JsonSchema::integer(Some("count"));
-        assert_eq!(i.schema_type, Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Integer)));
+        assert_eq!(
+            i.schema_type,
+            Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Integer))
+        );
         let n = JsonSchema::number(Some("price"));
-        assert_eq!(n.schema_type, Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Number)));
+        assert_eq!(
+            n.schema_type,
+            Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Number))
+        );
     }
 
     #[test]
     fn array_schema() {
         let a = JsonSchema::array(JsonSchema::string(None), Some("list"));
-        assert_eq!(a.schema_type, Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Array)));
+        assert_eq!(
+            a.schema_type,
+            Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Array))
+        );
         assert!(a.items.is_some());
         assert_eq!(a.description, Some("list".into()));
     }
@@ -154,10 +169,16 @@ mod tests {
         let mut props = BTreeMap::new();
         props.insert("name".into(), JsonSchema::string(Some("name")));
         let o = JsonSchema::object(props, Some(vec!["name".into()]), Some(false));
-        assert_eq!(o.schema_type, Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Object)));
+        assert_eq!(
+            o.schema_type,
+            Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Object))
+        );
         assert!(o.properties.is_some());
         assert_eq!(o.required.unwrap(), vec!["name"]);
-        assert_eq!(o.additional_properties, Some(AdditionalProperties::Bool(false)));
+        assert_eq!(
+            o.additional_properties,
+            Some(AdditionalProperties::Bool(false))
+        );
     }
 
     #[test]

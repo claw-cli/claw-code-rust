@@ -6,19 +6,27 @@ mod tests {
 
     #[test]
     fn execution_error_display() {
-        let err = ToolExecutionError::PermissionDenied { reason: "not allowed".into() };
+        let err = ToolExecutionError::PermissionDenied {
+            reason: "not allowed".into(),
+        };
         assert_eq!(err.to_string(), "permission denied: not allowed");
 
-        let err = ToolExecutionError::ExecutionFailed { message: "oops".into() };
+        let err = ToolExecutionError::ExecutionFailed {
+            message: "oops".into(),
+        };
         assert_eq!(err.to_string(), "execution failed: oops");
 
-        let err = ToolExecutionError::Timeout { message: "took too long".into() };
+        let err = ToolExecutionError::Timeout {
+            message: "took too long".into(),
+        };
         assert_eq!(err.to_string(), "timeout: took too long");
 
         let err = ToolExecutionError::Interrupted;
         assert_eq!(err.to_string(), "interrupted");
 
-        let err = ToolExecutionError::Internal { message: "bug".into() };
+        let err = ToolExecutionError::Internal {
+            message: "bug".into(),
+        };
         assert_eq!(err.to_string(), "internal: bug");
     }
 
@@ -35,7 +43,9 @@ mod tests {
 
     #[test]
     fn dispatch_error_from_execution() {
-        let exec = ToolExecutionError::ExecutionFailed { message: "fail".into() };
+        let exec = ToolExecutionError::ExecutionFailed {
+            message: "fail".into(),
+        };
         let dispatch: ToolDispatchError = exec.into();
         assert!(matches!(dispatch, ToolDispatchError::ExecutionError(_)));
     }

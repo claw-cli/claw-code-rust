@@ -306,9 +306,7 @@ mod tests {
         let registry = make_registry();
         let checker = PermissionChecker::new(|name| {
             let n = name.to_string();
-            Box::pin(async move {
-                Err(format!("{n} denied"))
-            })
+            Box::pin(async move { Err(format!("{n} denied")) })
         });
         let runtime = ToolRuntime::new(registry, checker);
         // Read-only tool should succeed (no permission check)
@@ -318,7 +316,10 @@ mod tests {
             input: serde_json::json!({}),
         };
         let read_result = runtime.execute_single(&read_call).await;
-        assert!(!read_result.is_error, "read-only tool should bypass permission check");
+        assert!(
+            !read_result.is_error,
+            "read-only tool should bypass permission check"
+        );
 
         // Mutating tool should be denied
         let write_call = ToolCall {
@@ -328,7 +329,12 @@ mod tests {
         };
         let write_result = runtime.execute_single(&write_call).await;
         assert!(write_result.is_error, "mutating tool should be denied");
-        assert!(write_result.content.into_string().contains("permission denied"));
+        assert!(
+            write_result
+                .content
+                .into_string()
+                .contains("permission denied")
+        );
     }
 
     #[tokio::test]
@@ -337,9 +343,21 @@ mod tests {
         let registry = make_registry();
         let runtime = ToolRuntime::new_without_permissions(registry);
         let calls = vec![
-            ToolCall { id: "r1".into(), name: "read_tool".into(), input: serde_json::json!({}) },
-            ToolCall { id: "r2".into(), name: "read_tool".into(), input: serde_json::json!({}) },
-            ToolCall { id: "w1".into(), name: "write_tool".into(), input: serde_json::json!({}) },
+            ToolCall {
+                id: "r1".into(),
+                name: "read_tool".into(),
+                input: serde_json::json!({}),
+            },
+            ToolCall {
+                id: "r2".into(),
+                name: "read_tool".into(),
+                input: serde_json::json!({}),
+            },
+            ToolCall {
+                id: "w1".into(),
+                name: "write_tool".into(),
+                input: serde_json::json!({}),
+            },
         ];
         let results = runtime.execute_batch(&calls).await;
         assert_eq!(results.len(), 3);

@@ -106,13 +106,17 @@ impl Default for ProcessStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use crate::unified_exec::process::UnifiedExecProcess;
+    use std::path::Path;
 
     fn spawn_echo() -> UnifiedExecProcess {
         let (proc, _rx) = UnifiedExecProcess::spawn(
             1,
-            if cfg!(windows) { "echo test" } else { "echo test" },
+            if cfg!(windows) {
+                "echo test"
+            } else {
+                "echo test"
+            },
             Path::new("."),
             None,
             false,

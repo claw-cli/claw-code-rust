@@ -887,6 +887,7 @@ mod tests {
     use devo_tools::json_schema::JsonSchema;
     use devo_tools::registry::ToolRegistryBuilder;
     use devo_tools::tool_handler::ToolHandler;
+    use devo_tools::router::PermissionChecker;
     use devo_tools::tool_spec::{ToolExecutionMode, ToolOutputMode, ToolSpec};
     use futures::Stream;
     use pretty_assertions::assert_eq;
@@ -1215,7 +1216,11 @@ mod tests {
             supports_parallel: false,
         });
         let registry = Arc::new(builder.build());
-        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
+        let deny_checker = PermissionChecker::new(|name| {
+            let n = name.to_string();
+            Box::pin(async move { Err(format!("{n} denied")) })
+        });
+        let runtime = ToolRuntime::new(Arc::clone(&registry), deny_checker);
 
         let mut session = SessionState::new(
             SessionConfig {

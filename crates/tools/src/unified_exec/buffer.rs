@@ -78,7 +78,7 @@ impl HeadTailBuffer {
         result
     }
 
-    /// Collect raw bytes (for when callers need Vec<u8> directly)
+    /// Collect raw bytes (for when callers need `Vec<u8>` directly)
     pub fn collect_bytes(&self) -> Vec<u8> {
         let mut result = Vec::with_capacity(self.head.len() + self.tail.len() + 100);
         result.extend_from_slice(&self.head);
@@ -161,8 +161,8 @@ mod tests {
 
         // 3-byte UTF-8 character "€" = [0xE2, 0x82, 0xAC]
         // Push data so that head limit is hit in the middle of the character
-        buf.push(b"ab");           // 2 bytes
-        buf.push(&[0xE2, 0x82]);   // 2 bytes of a 3-byte char → head overflow
+        buf.push(b"ab"); // 2 bytes
+        buf.push(&[0xE2, 0x82]); // 2 bytes of a 3-byte char → head overflow
         buf.tail.extend_from_slice(&[0xAC]); // the last byte ends up in tail
         buf.dropped = true;
 
