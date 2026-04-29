@@ -51,7 +51,7 @@ const IDLE_TIMEOUT_SECS: u64 = 1800;
 
 pub struct UnifiedExecProcess {
     exit_code: Arc<std::sync::atomic::AtomicI32>,
-    shutdown_flag: Arc<AtomicBool>,
+    terminated_flag: Arc<AtomicBool>,
     stdin_writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     output_tx: broadcast::Sender<Vec<u8>>,
     process_id: i32,
@@ -66,8 +66,8 @@ impl UnifiedExecProcess {
         login: bool,
     ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
         let (output_tx, _output_rx) = broadcast::channel(256);
-        let shutdown_flag = Arc::new(AtomicBool::new(false));
-        let shutdown_flag_clone = Arc::clone(&shutdown_flag);
+        let terminated_flag = Arc::new(AtomicBool::new(false));
+        let terminated_flag_clone = Arc::clone(&terminated_flag);
 
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -141,7 +141,7 @@ impl UnifiedExecProcess {
             loop {
                 tokio::select! {
                     _ = async {
-                        while !shutdown_flag_clone.load(Ordering::SeqCst) {
+                        while !terminated_flag_clone.load(Ordering::SeqCst) {
                             if started_at.elapsed() >= idle_timeout {
                                 break;
                             }
@@ -164,11 +164,26 @@ impl UnifiedExecProcess {
                 } else {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // After wait(), try_wait() should return exit status
+                    if let Ok(Some(s)) = child.try_wait() {
+                        exit_code_clone
+                            .store(s.exit_code() as i32, std::sync::atomic::Ordering::SeqCst);
+                    } else {
+                        exit_code_clone.store(-1, std::sync::atomic::Ordering::SeqCst);
+                    }
                 }
             } else {
                 let _ = child.kill();
                 let _ = child.wait();
+                if let Ok(Some(s)) = child.try_wait() {
+                    exit_code_clone
+                        .store(s.exit_code() as i32, std::sync::atomic::Ordering::SeqCst);
+                } else {
+                    exit_code_clone.store(-1, std::sync::atomic::Ordering::SeqCst);
+                }
             }
+            // Mark as no longer running (both normal exit and forced kill)
+            terminated_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
         let proc_output_rx = output_tx.subscribe();
@@ -176,7 +191,7 @@ impl UnifiedExecProcess {
         Ok((
             UnifiedExecProcess {
                 exit_code,
-                shutdown_flag,
+                terminated_flag,
                 stdin_writer: Arc::new(Mutex::new(Some(writer))),
                 output_tx,
                 process_id,
@@ -204,7 +219,7 @@ impl UnifiedExecProcess {
     }
 
     pub fn terminate(&self) {
-        self.shutdown_flag.store(true, Ordering::SeqCst);
+        self.terminated_flag.store(true, Ordering::SeqCst);
     }
 
     pub fn exit_code(&self) -> Option<i32> {
@@ -213,7 +228,9 @@ impl UnifiedExecProcess {
     }
 
     pub fn is_running(&self) -> bool {
-        self.exit_code.load(std::sync::atomic::Ordering::SeqCst) < 0
+        !self
+            .terminated_flag
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn process_id(&self) -> i32 {
