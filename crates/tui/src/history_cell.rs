@@ -299,7 +299,6 @@ impl HistoryCell for UserHistoryCell {
                 message_without_trailing_newlines
                     .split('\n')
                     .map(|line| Line::from(line).style(style)),
-                // Wrap algorithm matches textarea.rs.
                 RtOptions::new(usize::from(wrap_width))
                     .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
             );
@@ -321,17 +320,16 @@ impl HistoryCell for UserHistoryCell {
             (!wrapped.is_empty()).then_some(wrapped)
         };
 
-        let mut lines: Vec<Line<'static>> = vec![Line::from(""), Line::from("").style(style)];
+        let mut lines: Vec<Line<'static>> = vec![Line::from("")];
 
         if let Some(wrapped_message) = wrapped_message {
             lines.extend(prefix_lines(
                 wrapped_message,
-                "› ".bold().dim(),
-                "  ".into(),
+                "┃ ".cyan(),
+                "┃ ".cyan(),
             ));
         }
 
-        lines.push(Line::from("").style(style));
         lines.push(Line::from(""));
         lines
     }
@@ -1553,6 +1551,49 @@ impl HistoryCell for FinalMessageSeparator {
             ])
             .dim(),
         ]
+    }
+}
+
+/// End-of-turn summary showing ▣ symbol, model name, and duration.
+///
+/// Inspired by opencode's assistant message footer:
+/// `▣ model-name · 12.3s`
+#[derive(Debug)]
+pub struct TurnSummaryCell {
+    pub model_name: String,
+    pub duration: Option<u64>,
+}
+
+impl TurnSummaryCell {
+    pub(crate) fn new(model_name: String, duration: Option<u64>) -> Self {
+        Self {
+            model_name,
+            duration,
+        }
+    }
+}
+
+impl HistoryCell for TurnSummaryCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let _ = width;
+        let mut spans: Vec<Span<'static>> = vec![
+            Span::raw(" ".repeat(LIVE_PREFIX_COLS as usize)),
+            Span::styled("▣", Style::default().fg(Color::Cyan)),
+            Span::styled(" ", Style::default()),
+            Span::styled(self.model_name.clone(), Style::default().dim()),
+        ];
+        if let Some(duration) = self.duration {
+            let formatted = if duration < 60 {
+                format!("{duration}s")
+            } else {
+                let minutes = duration / 60;
+                let seconds = duration % 60;
+                format!("{minutes}m {seconds:02}s")
+            };
+            spans.push(Span::styled(" · ", Style::default().dim()));
+            spans.push(Span::styled(formatted, Style::default().dim()));
+        }
+        vec![Line::from(spans)]
     }
 }
 

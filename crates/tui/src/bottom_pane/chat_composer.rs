@@ -535,7 +535,7 @@ impl ChatComposer {
     }
 
     #[allow(dead_code)]
-    pub fn set_fast_command_enabled(&mut self, enabled: bool) {
+    pub(crate) fn set_fast_command_enabled(&mut self, enabled: bool) {
         self.fast_command_enabled = enabled;
     }
 
@@ -3755,14 +3755,14 @@ impl ChatComposer {
         if !textarea_rect.is_empty() {
             let prompt = if self.input_enabled {
                 if is_zellij {
-                    Span::styled("›", style.fg(ratatui::style::Color::Cyan))
+                    Span::styled("┃", style.fg(ratatui::style::Color::Cyan))
                 } else {
-                    "›".bold()
+                    "┃".cyan()
                 }
             } else if is_zellij {
-                Span::styled("›", style.fg(ratatui::style::Color::DarkGray))
+                Span::styled("┃", style.fg(ratatui::style::Color::DarkGray))
             } else {
-                "›".dim()
+                "┃".dark_gray()
             };
             buf.set_span(
                 textarea_rect.x - LIVE_PREFIX_COLS,
@@ -3818,5 +3818,6 @@ impl ChatComposer {
                 }
             }
         }
+
     }
 }

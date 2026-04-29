@@ -791,8 +791,24 @@ impl ChatWidget {
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
+                let elapsed = self
+                    .bottom_pane
+                    .status_widget()
+                    .map(|s| s.elapsed_seconds())
+                    .filter(|&secs| secs > 0);
+                let model_name = self
+                    .session
+                    .model
+                    .as_ref()
+                    .map(|m| m.display_name.clone())
+                    .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
+                    .unwrap_or_default();
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Ready");
+                self.add_to_history(history_cell::TurnSummaryCell::new(
+                    model_name,
+                    elapsed,
+                ));
             }
             WorkerEvent::TurnFailed {
                 message,

@@ -459,13 +459,17 @@ fn committed_history_drains_to_scrollback_lines() {
     widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
         stop_reason: "done".to_string(),
         turn_count: 1,
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        prompt_token_estimate: 0,
+        total_input_tokens: 10,
+        total_output_tokens: 20,
+        prompt_token_estimate: 10,
     });
 
     let committed_lines = trim_trailing_blank_scrollback_lines(widget.drain_scrollback_lines(80));
-    assert!(committed_lines.is_empty());
+    // TurnSummaryCell is now added on TurnFinished, so scrollback is non-empty.
+    assert!(!committed_lines.is_empty(), "TurnSummaryCell should be committed");
+    assert!(committed_lines.iter().any(|line| {
+        line.line.spans.iter().any(|span| span.content.contains("▣"))
+    }), "expected ▣ symbol in turn summary");
 }
 
 #[test]
@@ -588,8 +592,8 @@ fn session_switch_restores_header_and_double_blank_line_before_user_input() {
     assert!(committed_text.contains("world"));
     assert!(!committed_text.contains("session 1 lingering line"));
     assert!(
-        blank_line_indexes.windows(2).any(|window| window == [6, 7]),
-        "expected two blank lines before restored user input: {committed_lines:?}"
+        blank_line_indexes.windows(2).any(|window| window == [6, 8]),
+        "expected blank line spacing with colored bar before restored user input: {committed_lines:?}"
     );
 }
 
