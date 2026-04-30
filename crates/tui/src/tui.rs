@@ -676,8 +676,14 @@ impl Tui {
         B: Backend + std::io::Write,
     {
         if snapshot.mode == ExitLayoutMode::InlineChat && !snapshot.bottom_pane_area.is_empty() {
-            terminal.clear_screen_area(snapshot.bottom_pane_area)?;
-            terminal.set_cursor_below_rect(snapshot.bottom_pane_area)?;
+            let current_viewport_top = terminal.viewport_area.top();
+            let snapshot_viewport_top = snapshot.frame_area.top();
+            let bottom_pane_area = snapshot.bottom_pane_area.offset(ratatui::layout::Offset {
+                x: 0,
+                y: i32::from(current_viewport_top) - i32::from(snapshot_viewport_top),
+            });
+            terminal.clear_screen_area(bottom_pane_area)?;
+            terminal.set_cursor_below_rect(bottom_pane_area)?;
             return Ok(());
         }
 
@@ -828,7 +834,7 @@ mod tests {
             &mut terminal,
             ExitLayoutSnapshot {
                 mode: ExitLayoutMode::InlineChat,
-                frame_area: Rect::new(0, 0, width, 3),
+                frame_area: Rect::new(0, 3, width, 3),
                 history_area: Rect::new(0, 0, width, 1),
                 bottom_pane_area: Rect::new(0, 4, width, 2),
             },
@@ -847,6 +853,44 @@ mod tests {
         assert_eq!("", rows_after[4].trim_end());
         assert_eq!("", rows_after[5].trim_end());
         assert_eq!(Position { x: 0, y: 6 }, terminal.last_known_cursor_pos);
+    }
+
+    #[test]
+    fn shutdown_inline_precise_reanchors_bottom_pane_to_current_viewport() {
+        let width: u16 = 24;
+        let height: u16 = 10;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal = CustomTerminal::with_options(backend).expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 5, width, 3));
+
+        terminal
+            .set_cursor_position(Position { x: 0, y: 5 })
+            .expect("cursor position");
+        std::io::Write::write_all(terminal.backend_mut(), b"live history").expect("write history");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 6 })
+            .expect("cursor position");
+        std::io::Write::write_all(terminal.backend_mut(), b"current bottom").expect("write bottom");
+
+        Tui::apply_exit_layout_snapshot(
+            &mut terminal,
+            ExitLayoutSnapshot {
+                mode: ExitLayoutMode::InlineChat,
+                frame_area: Rect::new(0, 3, width, 3),
+                history_area: Rect::new(0, 3, width, 1),
+                bottom_pane_area: Rect::new(0, 4, width, 2),
+            },
+        )
+        .expect("apply exit snapshot");
+
+        let rows_after: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
+        assert!(
+            rows_after[5].contains("live history"),
+            "expected stale rows to remain untouched: {rows_after:?}"
+        );
+        assert_eq!("", rows_after[6].trim_end());
+        assert_eq!("", rows_after[7].trim_end());
+        assert_eq!(Position { x: 0, y: 8 }, terminal.last_known_cursor_pos);
     }
 
     #[test]
