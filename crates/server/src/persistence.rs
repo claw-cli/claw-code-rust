@@ -500,10 +500,10 @@ impl ReplayState {
             history_items: replayed_history_items,
             persisted_turn_items: replayed_persisted_turn_items,
             latest_compaction_snapshot: self.latest_compaction_snapshot,
-            steering_queue: std::sync::Arc::new(std::sync::Mutex::new(
+            pending_turn_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
-            steer_input_queue: std::sync::Arc::new(std::sync::Mutex::new(
+            btw_input_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
             active_task: None,

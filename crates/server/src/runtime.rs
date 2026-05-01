@@ -85,6 +85,8 @@ use crate::TurnStartResult;
 use crate::TurnSteerParams;
 use crate::TurnSteerResult;
 use crate::TurnUsageUpdatedPayload;
+use crate::db::QueueType;
+use crate::db::SessionStats;
 use crate::execution::RuntimeSession;
 use crate::execution::ServerRuntimeDependencies;
 use crate::persistence::RolloutStore;
@@ -148,9 +150,110 @@ impl ServerRuntime {
     }
 
     /// Loads durable sessions from rollout files and installs them into the runtime map.
+    /// Also restores token stats and pending queues from SQLite.
     pub async fn load_persisted_sessions(self: &Arc<Self>) -> anyhow::Result<()> {
         let sessions = self.rollout_store.load_sessions(&self.deps)?;
         tracing::info!(session_count = sessions.len(), "loaded persisted sessions");
+
+        // Restore token stats and pending queues from SQLite
+        for (session_id, session_arc) in &sessions {
+            let mut session = session_arc.lock().await;
+
+            // Skip ephemeral sessions
+            if session.summary.ephemeral {
+                continue;
+            }
+
+            // Restore token stats from SQLite
+            match self.deps.db.get_stats(session_id) {
+                Ok(Some(stats)) => {
+                    session.summary.total_input_tokens = stats.total_input_tokens;
+                    session.summary.total_output_tokens = stats.total_output_tokens;
+                    session.summary.prompt_token_estimate = stats.prompt_token_estimate;
+                    if let Ok(mut core) = session.core_session.try_lock() {
+                        core.total_input_tokens = stats.total_input_tokens;
+                        core.total_output_tokens = stats.total_output_tokens;
+                        core.total_cache_creation_tokens = stats.total_cache_creation_tokens;
+                        core.total_cache_read_tokens = stats.total_cache_read_tokens;
+                        core.last_input_tokens = stats.last_input_tokens;
+                        core.prompt_token_estimate = stats.prompt_token_estimate;
+                    }
+                    tracing::debug!(
+                        session_id = %session_id,
+                        "restored token stats from database"
+                    );
+                }
+                Ok(None) => {
+                    // No stats in database, persist current stats
+                    let stats = crate::db::SessionStats {
+                        total_input_tokens: session.summary.total_input_tokens,
+                        total_output_tokens: session.summary.total_output_tokens,
+                        total_cache_creation_tokens: 0,
+                        total_cache_read_tokens: 0,
+                        last_input_tokens: 0,
+                        turn_count: 0,
+                        prompt_token_estimate: session.summary.prompt_token_estimate,
+                    };
+                    if let Err(err) = self.deps.db.update_stats(session_id, &stats) {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %err,
+                            "failed to persist initial token stats to database"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %err,
+                        "failed to load token stats from database"
+                    );
+                }
+            }
+
+            // Restore pending turn queue from SQLite
+            match self
+                .deps
+                .db
+                .drain_pending(session_id, crate::db::QueueType::Turn)
+            {
+                Ok(items) => {
+                    if !items.is_empty() {
+                        let mut queue = session
+                            .pending_turn_queue
+                            .lock()
+                            .expect("pending turn queue mutex should not be poisoned");
+                        queue.extend(items);
+                        tracing::debug!(
+                            session_id = %session_id,
+                            pending_count = queue.len(),
+                            "restored pending turn queue from database"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %err,
+                        "failed to load pending turn queue from database"
+                    );
+                }
+            }
+
+            // Clear any stale btw inputs from previous session
+            if let Err(err) = self
+                .deps
+                .db
+                .clear_pending(session_id, crate::db::QueueType::Btw)
+            {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %err,
+                    "failed to clear stale btw inputs from database"
+                );
+            }
+        }
+
         let mut runtime_sessions = self.sessions.lock().await;
         runtime_sessions.extend(sessions);
         Ok(())
@@ -379,8 +482,8 @@ impl ServerRuntime {
             );
         }
         let core_session = self.deps.new_session_state(session_id, params.cwd.clone());
-        let steering_queue = Arc::clone(&core_session.pending_user_prompts);
-        let steer_input_queue = Arc::clone(&core_session.steer_input_queue);
+        let pending_turn_queue = Arc::clone(&core_session.pending_turn_queue);
+        let btw_input_queue = Arc::clone(&core_session.btw_input_queue);
         self.sessions.lock().await.insert(
             session_id,
             RuntimeSession {
@@ -393,8 +496,8 @@ impl ServerRuntime {
                 history_items: Vec::new(),
                 persisted_turn_items: Vec::new(),
                 latest_compaction_snapshot: None,
-                steering_queue,
-                steer_input_queue,
+                pending_turn_queue,
+                btw_input_queue,
                 active_task: None,
                 next_item_seq: 1,
                 first_user_input: None,
@@ -403,6 +506,18 @@ impl ServerRuntime {
         );
         self.subscribe_connection_to_session(connection_id, session_id, None)
             .await;
+
+        // Persist session metadata to SQLite (skip for ephemeral sessions)
+        if !summary.ephemeral
+            && let Err(err) = self.deps.db.upsert_session(&summary)
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err,
+                "failed to persist session metadata to database"
+            );
+        }
+
         tracing::info!(
             connection_id,
             session_id = %session_id,
@@ -499,6 +614,18 @@ impl ServerRuntime {
             }
             session.summary.clone()
         };
+
+        // Persist updated session metadata to SQLite
+        if !updated_session.ephemeral
+            && let Err(err) = self.deps.db.upsert_session(&updated_session)
+        {
+            tracing::warn!(
+                session_id = %params.session_id,
+                error = %err,
+                "failed to update session metadata in database"
+            );
+        }
+
         serde_json::to_value(SuccessResponse {
             id: request_id,
             result: SessionMetadataUpdateResult {
@@ -566,6 +693,18 @@ impl ServerRuntime {
             }
             session.summary.clone()
         };
+
+        // Persist updated session metadata to SQLite
+        if !summary.ephemeral
+            && let Err(err) = self.deps.db.upsert_session(&summary)
+        {
+            tracing::warn!(
+                session_id = %params.session_id,
+                error = %err,
+                "failed to update session title in database"
+            );
+        }
+
         self.broadcast_event(ServerEvent::SessionTitleUpdated(SessionEventPayload {
             session: summary.clone(),
         }))
@@ -695,8 +834,8 @@ impl ServerRuntime {
         let persisted_turn_items = source.persisted_turn_items.clone();
         drop(source_core_session);
         drop(source);
-        let steering_queue = Arc::clone(&core_session.pending_user_prompts);
-        let steer_input_queue = Arc::clone(&core_session.steer_input_queue);
+        let pending_turn_queue = Arc::clone(&core_session.pending_turn_queue);
+        let btw_input_queue = Arc::clone(&core_session.btw_input_queue);
         self.sessions.lock().await.insert(
             forked_id,
             RuntimeSession {
@@ -709,8 +848,8 @@ impl ServerRuntime {
                 history_items,
                 persisted_turn_items,
                 latest_compaction_snapshot,
-                steering_queue,
-                steer_input_queue,
+                pending_turn_queue,
+                btw_input_queue,
                 active_task: None,
                 next_item_seq: loaded_item_count + 1,
                 first_user_input: None,
@@ -1210,24 +1349,40 @@ impl ServerRuntime {
         let turn = {
             let mut session = session_arc.lock().await;
             if let Some(active_turn) = session.active_turn.as_ref() {
-                // Queue instead of rejecting — push directly to the steering_queue
+                // Queue instead of rejecting — push directly to the pending_turn_queue
                 // (independent lock) so we don't block on core_session which is
                 // held by the running query() loop.
-                let steering_queue = Arc::clone(&session.steering_queue);
+                let pending_turn_queue = Arc::clone(&session.pending_turn_queue);
                 let active_turn_id = active_turn.turn_id;
+                let is_ephemeral = session.summary.ephemeral;
                 drop(session);
 
                 {
-                    let mut guard = steering_queue
+                    let mut guard = pending_turn_queue
                         .lock()
-                        .expect("steering queue mutex should not be poisoned");
-                    guard.push_back(devo_core::PendingInputItem {
+                        .expect("pending turn queue mutex should not be poisoned");
+                    let item = devo_core::PendingInputItem {
                         kind: devo_core::PendingInputKind::UserText {
                             text: input_text.clone(),
                         },
                         metadata: None,
                         created_at: chrono::Utc::now(),
-                    });
+                    };
+                    guard.push_back(item.clone());
+
+                    // Persist to SQLite (skip for ephemeral sessions)
+                    if !is_ephemeral
+                        && let Err(err) =
+                            self.deps
+                                .db
+                                .push_pending(&params.session_id, QueueType::Turn, &item)
+                    {
+                        tracing::warn!(
+                            session_id = %params.session_id,
+                            error = %err,
+                            "failed to persist pending turn message to database"
+                        );
+                    }
                 }
                 // Send response via the high-priority channel so it bypasses
                 // any backlog of event notifications on the shared channel.
@@ -1291,11 +1446,25 @@ impl ServerRuntime {
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
             session.active_turn = Some(turn.clone());
+
+            // Clear pending queue (both in-memory and SQLite)
             session
-                .steering_queue
+                .pending_turn_queue
                 .lock()
-                .expect("steering queue mutex should not be poisoned")
+                .expect("pending turn queue mutex should not be poisoned")
                 .clear();
+            if !session.summary.ephemeral
+                && let Err(err) = self
+                    .deps
+                    .db
+                    .clear_pending(&params.session_id, QueueType::Turn)
+            {
+                tracing::warn!(
+                    session_id = %params.session_id,
+                    error = %err,
+                    "failed to clear pending turn messages from database"
+                );
+            }
             let clear_session_id = params.session_id;
             let runtime_for_broadcast = Arc::clone(self);
             tokio::spawn(async move {
@@ -1575,7 +1744,7 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        let (turn_id, workspace_root, steering_queue) = {
+        let (turn_id, workspace_root, btw_input_queue) = {
             let session = session_arc.lock().await;
             let Some(turn_id) = session.active_turn.as_ref().map(|turn| turn.turn_id) else {
                 return self.error_response(
@@ -1602,7 +1771,7 @@ impl ServerRuntime {
             (
                 turn_id,
                 session.summary.cwd.clone(),
-                Arc::clone(&session.steer_input_queue),
+                Arc::clone(&session.btw_input_queue),
             )
         };
         let prompt_text = match self
@@ -1647,14 +1816,32 @@ impl ServerRuntime {
             serde_json::json!({ "title": "You", "text": display_input }),
         )
         .await;
-        steering_queue
+        let item = devo_core::PendingInputItem {
+            kind: devo_core::PendingInputKind::UserText { text: prompt_text },
+            metadata: None,
+            created_at: chrono::Utc::now(),
+        };
+        btw_input_queue
             .lock()
-            .expect("steering queue mutex should not be poisoned")
-            .push_back(devo_core::PendingInputItem {
-                kind: devo_core::PendingInputKind::UserText { text: prompt_text },
-                metadata: None,
-                created_at: chrono::Utc::now(),
-            });
+            .expect("btw input queue mutex should not be poisoned")
+            .push_back(item.clone());
+
+        // Persist to SQLite (skip for ephemeral sessions)
+        {
+            let session = session_arc.lock().await;
+            if !session.summary.ephemeral
+                && let Err(err) =
+                    self.deps
+                        .db
+                        .push_pending(&params.session_id, QueueType::Btw, &item)
+            {
+                tracing::warn!(
+                    session_id = %params.session_id,
+                    error = %err,
+                    "failed to persist btw input to database"
+                );
+            }
+        }
 
         self.emit_to_connection(
             connection_id,
@@ -2112,8 +2299,53 @@ impl ServerRuntime {
             session.summary.total_input_tokens = session_total_input_tokens;
             session.summary.total_output_tokens = session_total_output_tokens;
             session.summary.prompt_token_estimate = session_prompt_token_estimate;
+
+            // Persist token stats to SQLite (skip for ephemeral sessions)
+            if !session.summary.ephemeral {
+                let stats = SessionStats {
+                    total_input_tokens: session_total_input_tokens,
+                    total_output_tokens: session_total_output_tokens,
+                    total_cache_creation_tokens: 0,
+                    total_cache_read_tokens: 0,
+                    last_input_tokens: final_turn
+                        .usage
+                        .as_ref()
+                        .map(|u| u.input_tokens as usize)
+                        .unwrap_or(0),
+                    turn_count: session.summary.updated_at.timestamp() as usize,
+                    prompt_token_estimate: session_prompt_token_estimate,
+                };
+                if let Err(err) = self.deps.db.update_stats(&session_id, &stats) {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %err,
+                        "failed to persist token stats to database"
+                    );
+                }
+            }
+
             final_turn
         };
+
+        // Clear btw input queue (both in-memory and SQLite)
+        {
+            let session = session_arc.lock().await;
+            session
+                .btw_input_queue
+                .lock()
+                .expect("btw input queue mutex should not be poisoned")
+                .clear();
+            if !session.summary.ephemeral
+                && let Err(err) = self.deps.db.clear_pending(&session_id, QueueType::Btw)
+            {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %err,
+                    "failed to clear btw input messages from database"
+                );
+            }
+        }
+
         let (record, session_context, turn_context) = {
             let session = session_arc.lock().await;
             let core_session = session.core_session.lock().await;
@@ -2184,16 +2416,16 @@ impl ServerRuntime {
                 Some(s) => s,
                 None => return,
             };
-            let steering_queue = {
+            let pending_turn_queue = {
                 let session = session_arc.lock().await;
                 if session.active_turn.is_some() {
                     return;
                 }
-                Arc::clone(&session.steering_queue)
+                Arc::clone(&session.pending_turn_queue)
             };
-            let mut queue = steering_queue
+            let mut queue = pending_turn_queue
                 .lock()
-                .expect("steering queue mutex should not be poisoned");
+                .expect("pending turn queue mutex should not be poisoned");
             match queue.pop_front() {
                 Some(devo_core::PendingInputItem {
                     kind: devo_core::PendingInputKind::UserText { text },
@@ -2285,13 +2517,13 @@ impl ServerRuntime {
                 Some(s) => s,
                 None => return,
             };
-            let steering_queue = {
+            let pending_turn_queue = {
                 let session = session_arc.lock().await;
-                Arc::clone(&session.steering_queue)
+                Arc::clone(&session.pending_turn_queue)
             };
-            let mut guard = steering_queue
+            let mut guard = pending_turn_queue
                 .lock()
-                .expect("steering queue mutex should not be poisoned");
+                .expect("pending turn queue mutex should not be poisoned");
             match guard.pop_front() {
                 Some(devo_core::PendingInputItem {
                     kind: devo_core::PendingInputKind::UserText { text },
@@ -2381,9 +2613,9 @@ impl ServerRuntime {
         let (pending_count, pending_texts) = {
             let session = session_arc.lock().await;
             let queue = session
-                .steering_queue
+                .pending_turn_queue
                 .lock()
-                .expect("steering queue mutex should not be poisoned");
+                .expect("pending turn queue mutex should not be poisoned");
             let texts: Vec<String> = queue
                 .iter()
                 .filter_map(|item| match &item.kind {
