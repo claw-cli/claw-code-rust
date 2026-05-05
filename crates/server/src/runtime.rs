@@ -1713,37 +1713,45 @@ impl ServerRuntime {
             );
         };
 
-        // Complete any deferred (in-progress) items before aborting the turn task
-        {
+        // Complete any deferred (in-progress) items before aborting the turn task.
+        // Take the items out while holding the session lock, then drop the lock
+        // before calling complete_item to avoid re-locking session_arc inside
+        // persist_item, which would deadlock on the non-reentrant tokio Mutex.
+        let deferred_assistant = {
             let mut session = session_arc.lock().await;
-            if let Some((item_id, item_seq, text)) = session.deferred_assistant.take() {
-                self.complete_item(
-                    params.session_id,
-                    params.turn_id,
-                    item_id,
-                    item_seq,
-                    ItemKind::AgentMessage,
-                    TurnItem::AgentMessage(TextItem {
-                        text: text.clone(),
-                    }),
-                    serde_json::json!({ "title": "Assistant", "text": text }),
-                )
-                .await;
-            }
-            if let Some((item_id, item_seq, text)) = session.deferred_reasoning.take() {
-                self.complete_item(
-                    params.session_id,
-                    params.turn_id,
-                    item_id,
-                    item_seq,
-                    ItemKind::Reasoning,
-                    TurnItem::Reasoning(TextItem {
-                        text: text.clone(),
-                    }),
-                    serde_json::json!({ "title": "Reasoning", "text": text }),
-                )
-                .await;
-            }
+            session.deferred_assistant.take()
+        };
+        let deferred_reasoning = {
+            let mut session = session_arc.lock().await;
+            session.deferred_reasoning.take()
+        };
+        if let Some((item_id, item_seq, text)) = deferred_assistant {
+            self.complete_item(
+                params.session_id,
+                params.turn_id,
+                item_id,
+                item_seq,
+                ItemKind::AgentMessage,
+                TurnItem::AgentMessage(TextItem {
+                    text: text.clone(),
+                }),
+                serde_json::json!({ "title": "Assistant", "text": text }),
+            )
+            .await;
+        }
+        if let Some((item_id, item_seq, text)) = deferred_reasoning {
+            self.complete_item(
+                params.session_id,
+                params.turn_id,
+                item_id,
+                item_seq,
+                ItemKind::Reasoning,
+                TurnItem::Reasoning(TextItem {
+                    text: text.clone(),
+                }),
+                serde_json::json!({ "title": "Reasoning", "text": text }),
+            )
+            .await;
         }
 
         if let Some(task) = self.active_tasks.lock().await.remove(&params.session_id) {
