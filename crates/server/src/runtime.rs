@@ -1785,12 +1785,18 @@ impl ServerRuntime {
         };
         let (record, session_context, turn_context) = {
             let session = session_arc.lock().await;
-            let core_session = session.core_session.lock().await;
-            (
-                session.record.clone(),
-                core_session.session_context.clone(),
-                core_session.latest_turn_context.clone(),
-            )
+            let core_session_lock = session.core_session.try_lock();
+            if let Ok(core_session) = core_session_lock {
+                (
+                    session.record.clone(),
+                    core_session.session_context.clone(),
+                    core_session.latest_turn_context.clone(),
+                )
+            } else {
+                // core_session is held by the running turn task — skip
+                // session context in the rollout record for this interrupt.
+                (session.record.clone(), None, None)
+            }
         };
         if let Some(record) = record
             && let Err(error) = self.rollout_store.append_turn(
