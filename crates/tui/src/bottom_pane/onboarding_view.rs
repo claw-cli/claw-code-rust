@@ -17,8 +17,6 @@ use ratatui::widgets::Wrap;
 use devo_protocol::Model;
 use devo_protocol::ProviderWireApi;
 
-use super::CancellationEvent;
-use super::bottom_pane_view::BottomPaneView;
 use super::popup_consts::MAX_POPUP_ROWS;
 use super::scroll_state::ScrollState;
 /// Simple content area with padding, no background styling.
@@ -215,6 +213,11 @@ impl OnboardingView {
 
     pub(crate) fn is_complete(&self) -> bool {
         self.complete
+    }
+
+    pub(crate) fn cancel(&mut self) {
+        self.complete = true;
+        self.result = Some(OnboardingResult::Cancelled);
     }
 
     /// Called when validation succeeds.
@@ -1297,8 +1300,9 @@ impl OnboardingView {
     }
 }
 
-impl BottomPaneView for OnboardingView {
-    fn handle_key_event(&mut self, key_event: KeyEvent) {
+impl OnboardingView {
+    /// Entry point for key events, called by `OnboardingHandle`.
+    pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
         if matches!(key_event.kind, KeyEventKind::Release) {
             return;
         }
@@ -1320,36 +1324,6 @@ impl BottomPaneView for OnboardingView {
                 self.validation_failed_handle_key(key_event);
             }
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.complete
-    }
-
-    fn view_id(&self) -> Option<&'static str> {
-        Some("onboarding")
-    }
-
-    fn on_ctrl_c(&mut self) -> CancellationEvent {
-        self.complete = true;
-        self.result = Some(OnboardingResult::Cancelled);
-        CancellationEvent::Handled
-    }
-
-    fn prefer_esc_to_handle_key_event(&self) -> bool {
-        true
-    }
-
-    fn take_onboarding_result(&mut self) -> Option<OnboardingResult> {
-        self.result.take()
-    }
-
-    fn on_validation_succeeded(&mut self, reply_preview: String) {
-        self.on_validation_succeeded(reply_preview);
-    }
-
-    fn on_validation_failed(&mut self, error_message: String) {
-        self.on_validation_failed(error_message);
     }
 }
 

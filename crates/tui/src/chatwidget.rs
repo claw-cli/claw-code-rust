@@ -644,6 +644,9 @@ impl ChatWidget {
             self.handle_resume_browser_key_event(key);
             return;
         }
+        if let Some(result) = self.bottom_pane.poll_onboarding_result() {
+            self.handle_onboarding_result(result);
+        }
         match self.bottom_pane.handle_key_event(key) {
             InputResult::Submitted {
                 text,
@@ -954,11 +957,8 @@ impl ChatWidget {
             WorkerEvent::ProviderValidationSucceeded { reply_preview } => {
                 self.bottom_pane
                     .onboarding_on_validation_succeeded(reply_preview.clone());
-                if !self.bottom_pane.is_onboarding_active() {
-                    // Onboarding view completed, check for result
-                    if let Some(result) = self.bottom_pane.take_onboarding_result() {
-                        self.handle_onboarding_result(result);
-                    }
+                if let Some(result) = self.bottom_pane.poll_onboarding_result() {
+                    self.handle_onboarding_result(result);
                 }
                 self.add_to_history(history_cell::new_info_event(
                     format!("Validation reply: {reply_preview}"),
@@ -1124,12 +1124,8 @@ impl ChatWidget {
     }
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
-        // Check if the onboarding view completed with a validation request
-        if self.bottom_pane.is_onboarding_active() {
-            if let Some(result) = self.bottom_pane.take_onboarding_result() {
-                self.handle_onboarding_result(result);
-            }
-            return;
+        if let Some(result) = self.bottom_pane.poll_onboarding_result() {
+            self.handle_onboarding_result(result);
         }
         if user_message.text.trim().is_empty() {
             return;
@@ -1283,7 +1279,7 @@ impl ChatWidget {
         self.onboarding_step = None;
         self.history.clear();
         self.next_history_flush_index = 0;
-        self.bottom_pane.open_onboarding(&self.available_models);
+        self.bottom_pane.start_onboarding(&self.available_models);
         self.set_status_message("Onboarding");
     }
 
