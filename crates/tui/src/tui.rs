@@ -678,8 +678,7 @@ impl Tui {
         if snapshot.mode == ExitLayoutMode::InlineChat && !snapshot.bottom_pane_area.is_empty() {
             let current_viewport_top = terminal.viewport_area.top();
             let snapshot_viewport_top = snapshot.frame_area.top();
-            let delta_y =
-                i32::from(current_viewport_top) - i32::from(snapshot_viewport_top);
+            let delta_y = i32::from(current_viewport_top) - i32::from(snapshot_viewport_top);
             // Offset the snapshot coordinates to account for viewport drift since
             // the last render (e.g. from flush_pending_history_lines_for_exit).
             let offset = ratatui::layout::Offset { x: 0, y: delta_y };
@@ -691,9 +690,7 @@ impl Tui {
                 x: 0,
                 y: history_area.top(),
                 width: terminal.size()?.width,
-                height: bottom_pane_area
-                    .bottom()
-                    .saturating_sub(history_area.top()),
+                height: bottom_pane_area.bottom().saturating_sub(history_area.top()),
             };
             terminal.clear_screen_area(clear_area)?;
             terminal.set_cursor_below_rect(bottom_pane_area)?;
@@ -967,44 +964,35 @@ mod tests {
         terminal
             .set_cursor_position(Position { x: 0, y: 2 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"scrollback row 1")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"scrollback row 1").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 3 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"scrollback row 2")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"scrollback row 2").expect("write");
 
         // Write live content within the viewport
         terminal
             .set_cursor_position(Position { x: 0, y: 4 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"live history row")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"live history row").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 5 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"live assistant row")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"live assistant row").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 6 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"bottom pane row 1")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"bottom pane row 1").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 7 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"bottom pane row 2")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"bottom pane row 2").expect("write");
 
         // Simulate pending history lines pushed before exit.
         // flush_pending_history_lines_for_exit() inserts these above the viewport,
         // shifting viewport.y downward.
-        let mut pending_lines = vec![
-            ScrollbackLine::from(Line::from("pending history line")),
-        ];
-        insert_history_lines(&mut terminal, pending_lines.clone())
-            .expect("insert");
+        let mut pending_lines = vec![ScrollbackLine::from(Line::from("pending history line"))];
+        insert_history_lines(&mut terminal, pending_lines.clone()).expect("insert");
         pending_lines.clear();
         // viewport.y is now 5 (shifted down by 1)
 
@@ -1020,8 +1008,7 @@ mod tests {
         )
         .expect("apply");
 
-        let rows: Vec<String> =
-            terminal.backend().vt100().screen().rows(0, width).collect();
+        let rows: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
 
         // Scrollback rows above viewport must be preserved
         let scrollback_idx = rows
@@ -1062,23 +1049,19 @@ mod tests {
         terminal
             .set_cursor_position(Position { x: 0, y: 2 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"session header row")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"session header row").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 3 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"live text row")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"live text row").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 4 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"composer row 1")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"composer row 1").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 5 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"composer row 2")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"composer row 2").expect("write");
 
         // Snapshot captures the full viewport at y=2
         Tui::apply_exit_layout_snapshot(
@@ -1092,13 +1075,10 @@ mod tests {
         )
         .expect("apply");
 
-        let rows: Vec<String> =
-            terminal.backend().vt100().screen().rows(0, width).collect();
+        let rows: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
 
         // History area rows (y=2,3) should be cleared — session header should NOT remain
-        let header_row = rows
-            .iter()
-            .position(|r| r.contains("session header row"));
+        let header_row = rows.iter().position(|r| r.contains("session header row"));
         assert!(
             header_row.is_none(),
             "session header should be cleared, but found at row {:?}: {rows:?}",
@@ -1133,23 +1113,19 @@ mod tests {
         terminal
             .set_cursor_position(Position { x: 0, y: 3 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"status line")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"status line").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 4 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"composer")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"composer").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 5 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"footer")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"footer").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 6 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"spacer")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"spacer").expect("write");
 
         // Snapshot — no pending history lines, delta_y = 0
         Tui::apply_exit_layout_snapshot(
@@ -1163,8 +1139,7 @@ mod tests {
         )
         .expect("apply");
 
-        let rows: Vec<String> =
-            terminal.backend().vt100().screen().rows(0, width).collect();
+        let rows: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
 
         // All viewport rows cleared
         assert_eq!("", rows[3].trim_end());
@@ -1188,38 +1163,31 @@ mod tests {
         terminal
             .set_cursor_position(Position { x: 0, y: 2 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"  Welcome to Devo")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"  Welcome to Devo").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 3 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"  Choose a model")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"  Choose a model").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 4 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"  > model-name")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"  > model-name").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 5 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"  model desc")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"  model desc").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 6 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"  > other-model")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"  > other-model").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 7 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"  other desc")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"  other desc").expect("write");
         terminal
             .set_cursor_position(Position { x: 0, y: 8 })
             .expect("cursor");
-        std::io::Write::write_all(terminal.backend_mut(), b"  > Custom Model")
-            .expect("write");
+        std::io::Write::write_all(terminal.backend_mut(), b"  > Custom Model").expect("write");
 
         // Snapshot — large bottom_pane_area like onboarding view
         Tui::apply_exit_layout_snapshot(
@@ -1233,8 +1201,7 @@ mod tests {
         )
         .expect("apply");
 
-        let rows: Vec<String> =
-            terminal.backend().vt100().screen().rows(0, width).collect();
+        let rows: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
 
         // All onboarding content cleared
         for y in 2..9 {

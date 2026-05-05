@@ -295,9 +295,7 @@ impl ServerRuntime {
                     item_id,
                     item_seq,
                     ItemKind::AgentMessage,
-                    TurnItem::AgentMessage(TextItem {
-                        text: text.clone(),
-                    }),
+                    TurnItem::AgentMessage(TextItem { text: text.clone() }),
                     serde_json::json!({ "title": "Assistant", "text": text }),
                 )
                 .await;
@@ -309,9 +307,7 @@ impl ServerRuntime {
                     item_id,
                     item_seq,
                     ItemKind::Reasoning,
-                    TurnItem::Reasoning(TextItem {
-                        text: text.clone(),
-                    }),
+                    TurnItem::Reasoning(TextItem { text: text.clone() }),
                     serde_json::json!({ "title": "Reasoning", "text": text }),
                 )
                 .await;
@@ -332,9 +328,11 @@ impl ServerRuntime {
                 session.latest_turn = Some(turn.clone());
                 session.summary.status = SessionRuntimeStatus::Idle;
                 session.summary.updated_at = Utc::now();
-                let token_totals = session.core_session.try_lock().ok().map(
-                    |core| (core.total_input_tokens, core.total_output_tokens),
-                );
+                let token_totals = session
+                    .core_session
+                    .try_lock()
+                    .ok()
+                    .map(|core| (core.total_input_tokens, core.total_output_tokens));
                 if let Some((input, output)) = token_totals {
                     session.summary.total_input_tokens = input;
                     session.summary.total_output_tokens = output;
@@ -347,7 +345,10 @@ impl ServerRuntime {
                 let (session_context, turn_context) = {
                     let session = session_arc.lock().await;
                     let core = session.core_session.lock().await;
-                    (core.session_context.clone(), core.latest_turn_context.clone())
+                    (
+                        core.session_context.clone(),
+                        core.latest_turn_context.clone(),
+                    )
                 };
                 if let Err(error) = self.rollout_store.append_turn(
                     &record,
@@ -1732,9 +1733,7 @@ impl ServerRuntime {
                 item_id,
                 item_seq,
                 ItemKind::AgentMessage,
-                TurnItem::AgentMessage(TextItem {
-                    text: text.clone(),
-                }),
+                TurnItem::AgentMessage(TextItem { text: text.clone() }),
                 serde_json::json!({ "title": "Assistant", "text": text }),
             )
             .await;
@@ -1746,9 +1745,7 @@ impl ServerRuntime {
                 item_id,
                 item_seq,
                 ItemKind::Reasoning,
-                TurnItem::Reasoning(TextItem {
-                    text: text.clone(),
-                }),
+                TurnItem::Reasoning(TextItem { text: text.clone() }),
                 serde_json::json!({ "title": "Reasoning", "text": text }),
             )
             .await;

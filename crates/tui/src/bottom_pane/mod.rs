@@ -187,7 +187,9 @@ impl OnboardingHandle {
     }
 
     pub(crate) fn take_result(&mut self) -> Option<OnboardingResult> {
-        self.completed_result.take().or_else(|| self.view.take_result())
+        self.completed_result
+            .take()
+            .or_else(|| self.view.take_result())
     }
 
     pub(crate) fn on_validation_succeeded(&mut self, reply_preview: String) {
