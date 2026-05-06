@@ -785,18 +785,27 @@ impl Drop for Tui {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+
     use pretty_assertions::assert_eq;
+    use tokio::sync::mpsc;
     use ratatui::layout::Position;
     use ratatui::layout::Rect;
     use ratatui::text::Line;
 
     use super::Tui;
+    use crate::app_event_sender::AppEventSender;
+    use crate::chatwidget::ChatWidget;
+    use crate::chatwidget::ChatWidgetInit;
     use crate::chatwidget::ExitLayoutMode;
     use crate::chatwidget::ExitLayoutSnapshot;
+    use crate::chatwidget::TuiSessionState;
     use crate::custom_terminal::Terminal as CustomTerminal;
     use crate::history_cell::ScrollbackLine;
     use crate::insert_history::insert_history_lines;
+    use crate::render::renderable::Renderable;
     use crate::test_backend::VT100Backend;
+    use devo_protocol::Model;
 
     #[test]
     fn reset_inline_session_ui_clears_pending_history_and_visible_transcript() {
@@ -1218,5 +1227,92 @@ mod tests {
 
         // Cursor below the cleared bottom pane
         assert_eq!(Position { x: 0, y: 9 }, terminal.last_known_cursor_pos);
+    }
+
+    #[test]
+    fn exit_position_places_cursor_directly_below_last_status_line_after_render() {
+        let width: u16 = 80;
+        let height: u16 = 14;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal = CustomTerminal::with_options(backend).expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 4, width, 6));
+
+        insert_history_lines(
+            &mut terminal,
+            vec![Line::from("scrollback row before devo").into()],
+        )
+        .expect("insert scrollback");
+
+        let model = Model {
+            slug: "test-model".to_string(),
+            display_name: "Test Model".to_string(),
+            ..Model::default()
+        };
+        let cwd = env::current_dir().expect("current directory is available");
+        let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
+        let widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+            frame_requester: crate::tui::frame_requester::FrameRequester::test_dummy(),
+            app_event_tx: AppEventSender::new(app_event_tx),
+            initial_session: TuiSessionState::new(cwd, Some(model)),
+            initial_thinking_selection: None,
+            initial_user_message: None,
+            enhanced_keys_supported: true,
+            is_first_run: false,
+            available_models: Vec::new(),
+            saved_model_slugs: Vec::new(),
+            show_model_onboarding: false,
+            startup_tooltip_override: None,
+            initial_theme_name: None,
+        });
+        let snapshot_handle = widget.exit_layout_snapshot_handle();
+
+        let expected_snapshot = {
+            terminal
+                .draw(|frame| {
+                let area = frame.area();
+                widget.render(area, frame.buffer_mut());
+                if let Some((x, y)) = widget.cursor_pos(area) {
+                    frame.set_cursor_position((x, y));
+                }
+            })
+            .expect("draw");
+
+            *snapshot_handle.lock().expect("snapshot lock")
+        };
+
+        assert_eq!(ExitLayoutMode::InlineChat, expected_snapshot.mode);
+        assert!(
+            !expected_snapshot.bottom_pane_area.is_empty(),
+            "expected rendered bottom pane area"
+        );
+
+        Tui::apply_exit_layout_snapshot(&mut terminal, expected_snapshot).expect("shutdown");
+
+        let rows: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
+        let scrollback_row = rows
+            .iter()
+            .position(|row| row.contains("scrollback row before devo"))
+            .expect("scrollback row remains visible");
+        assert!(
+            scrollback_row < expected_snapshot.history_area.top() as usize,
+            "scrollback should remain above cleared devo area: {rows:?}"
+        );
+
+        for y in expected_snapshot.history_area.top()..expected_snapshot.bottom_pane_area.bottom() {
+            assert_eq!(
+                "",
+                rows[y as usize].trim_end(),
+                "row {y} should be cleared before shell prompt resumes"
+            );
+        }
+
+        assert_eq!(
+            Position {
+                x: 0,
+                y: expected_snapshot.bottom_pane_area.bottom(),
+            },
+            terminal.last_known_cursor_pos,
+            "cursor must be placed directly below the last visible status line"
+        );
     }
 }
