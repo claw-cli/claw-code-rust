@@ -497,9 +497,6 @@ impl ChatWidget {
     ) {
         self.history.clear();
         self.next_history_flush_index = 0;
-        self.push_session_header(
-            /*is_first_run*/ false, /*startup_tooltip_override*/ None,
-        );
 
         tracing::trace!(
             session_id,
@@ -826,21 +823,18 @@ impl ChatWidget {
         if self.selection_mode {
             // Load the selected user message text into the composer for editing
             // and exit selection mode.
-            if let Some(idx) = self.selected_user_cell_index {
-                if let Some(history_idx) = self.user_cell_history_indices.get(idx) {
-                    if let Some(cell) = self.history.get(*history_idx) {
-                        if let Some(user_cell) = cell
-                            .as_ref()
-                            .as_any()
-                            .downcast_ref::<history_cell::UserHistoryCell>()
-                        {
-                            let text = user_cell.message.clone();
-                            self.bottom_pane.restore_input_from_history(Some(text));
-                            self.exit_selection_mode();
-                            return;
-                        }
-                    }
-                }
+            if let Some(idx) = self.selected_user_cell_index
+                && let Some(history_idx) = self.user_cell_history_indices.get(idx)
+                && let Some(cell) = self.history.get(*history_idx)
+                && let Some(user_cell) = cell
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<history_cell::UserHistoryCell>()
+            {
+                let text = user_cell.message.clone();
+                self.bottom_pane.restore_input_from_history(Some(text));
+                self.exit_selection_mode();
+                return;
             }
         }
         self.exit_selection_mode();
@@ -1191,9 +1185,6 @@ impl ChatWidget {
                 self.total_input_tokens = 0;
                 self.total_output_tokens = 0;
                 self.prompt_token_estimate = 0;
-                self.push_session_header(
-                    /*is_first_run*/ false, /*startup_tooltip_override*/ None,
-                );
                 self.set_status_message("New session ready; send a prompt to start it");
             }
             WorkerEvent::SessionSwitched {

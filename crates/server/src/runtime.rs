@@ -2380,7 +2380,13 @@ impl ServerRuntime {
                     QueryEvent::TurnComplete { .. } => {}
                 }
             }
-            if let (Some(item_id), Some(item_seq)) = (assistant_item_id, assistant_item_seq) {
+            // Complete any deferred items that the interrupt handler didn't already take.
+            // handle_interrupt takes deferred_assistant/deferred_reasoning from the session
+            // and completes them; if they're already None we must skip to avoid persisting duplicates.
+            if let Some((item_id, item_seq, text)) = {
+                let mut session = event_session_arc.lock().await;
+                session.deferred_assistant.take()
+            } {
                 runtime
                     .complete_item(
                         session_id,
@@ -2388,14 +2394,15 @@ impl ServerRuntime {
                         item_id,
                         item_seq,
                         ItemKind::AgentMessage,
-                        TurnItem::AgentMessage(TextItem {
-                            text: assistant_text.clone(),
-                        }),
-                        serde_json::json!({ "title": "Assistant", "text": assistant_text }),
+                        TurnItem::AgentMessage(TextItem { text: text.clone() }),
+                        serde_json::json!({ "title": "Assistant", "text": text }),
                     )
                     .await;
             }
-            if let (Some(item_id), Some(item_seq)) = (reasoning_item_id, reasoning_item_seq) {
+            if let Some((item_id, item_seq, text)) = {
+                let mut session = event_session_arc.lock().await;
+                session.deferred_reasoning.take()
+            } {
                 runtime
                     .complete_item(
                         session_id,
@@ -2403,10 +2410,8 @@ impl ServerRuntime {
                         item_id,
                         item_seq,
                         ItemKind::Reasoning,
-                        TurnItem::Reasoning(TextItem {
-                            text: reasoning_text.clone(),
-                        }),
-                        serde_json::json!({ "title": "Reasoning", "text": reasoning_text }),
+                        TurnItem::Reasoning(TextItem { text: text.clone() }),
+                        serde_json::json!({ "title": "Reasoning", "text": text }),
                     )
                     .await;
             }

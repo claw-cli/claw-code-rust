@@ -504,6 +504,7 @@ fn build_full_line(row: &GenericDisplayRow, desc_col: usize) -> Line<'static> {
 /// and behavior for selection popups.
 /// Returns the number of terminal lines actually rendered (including the
 /// single-line empty placeholder when shown).
+#[allow(clippy::too_many_arguments)]
 fn render_rows_inner(
     area: Rect,
     buf: &mut Buffer,
@@ -651,6 +652,7 @@ pub(crate) fn render_rows_stable_col_widths(
 /// This is the low-level entry point for callers that need to thread a mode
 /// through higher-level configuration.
 /// Returns the number of terminal lines actually rendered.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_rows_with_col_width_mode(
     area: Rect,
     buf: &mut Buffer,

@@ -638,7 +638,8 @@ fn session_switch_restores_header_and_double_blank_line_before_user_input() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(1, committed_text.matches("directory:").count());
+    // The header box is rendered only once on initial launch, not on session switch.
+    assert_eq!(0, committed_text.matches("directory:").count());
     assert!(committed_text.contains("hello"));
     assert!(committed_text.contains("world"));
     assert!(!committed_text.contains("session 1 lingering line"));

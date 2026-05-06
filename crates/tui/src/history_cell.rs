@@ -1105,6 +1105,7 @@ pub(crate) struct HeaderHistoryCell {
 }
 
 impl HeaderHistoryCell {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         model: String,
         thinking_capability: ThinkingCapability,
