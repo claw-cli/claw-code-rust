@@ -293,11 +293,16 @@ fn wrap_row_lines(row: &GenericDisplayRow, desc_col: usize, width: u16) -> Vec<L
     wrap_standard_row(row, desc_col, width)
 }
 
-fn apply_row_state_style(lines: &mut [Line<'static>], selected: bool, is_disabled: bool) {
+fn apply_row_state_style(
+    lines: &mut [Line<'static>],
+    selected: bool,
+    is_disabled: bool,
+    accent_color: Color,
+) {
     if selected {
         for line in lines.iter_mut() {
             line.spans.iter_mut().for_each(|span| {
-                span.style = Style::default().fg(Color::Cyan).bold();
+                span.style = Style::default().fg(accent_color).bold();
             });
         }
     }
@@ -507,6 +512,7 @@ fn render_rows_inner(
     max_results: usize,
     empty_message: &str,
     col_width_mode: ColumnWidthMode,
+    accent_color: Color,
 ) -> u16 {
     if rows_all.is_empty() {
         if area.height > 0 {
@@ -556,6 +562,7 @@ fn render_rows_inner(
             &mut wrapped,
             Some(i) == state.selected_idx && !row.is_disabled,
             row.is_disabled,
+            accent_color,
         );
 
         // Render the wrapped lines.
@@ -587,7 +594,6 @@ fn render_rows_inner(
 ///
 /// This function should be paired with [`measure_rows_height`] when reserving
 /// space; pairing it with a different measurement mode can cause clipping.
-/// Returns the number of terminal lines actually rendered.
 pub(crate) fn render_rows(
     area: Rect,
     buf: &mut Buffer,
@@ -595,6 +601,7 @@ pub(crate) fn render_rows(
     state: &ScrollState,
     max_results: usize,
     empty_message: &str,
+    accent_color: Color,
 ) -> u16 {
     render_rows_inner(
         area,
@@ -604,6 +611,7 @@ pub(crate) fn render_rows(
         max_results,
         empty_message,
         ColumnWidthMode::AutoVisible,
+        accent_color,
     )
 }
 
@@ -623,6 +631,7 @@ pub(crate) fn render_rows_stable_col_widths(
     state: &ScrollState,
     max_results: usize,
     empty_message: &str,
+    accent_color: Color,
 ) -> u16 {
     render_rows_inner(
         area,
@@ -632,6 +641,7 @@ pub(crate) fn render_rows_stable_col_widths(
         max_results,
         empty_message,
         ColumnWidthMode::AutoAllRows,
+        accent_color,
     )
 }
 
@@ -649,6 +659,7 @@ pub(crate) fn render_rows_with_col_width_mode(
     max_results: usize,
     empty_message: &str,
     col_width_mode: ColumnWidthMode,
+    accent_color: Color,
 ) -> u16 {
     render_rows_inner(
         area,
@@ -658,6 +669,7 @@ pub(crate) fn render_rows_with_col_width_mode(
         max_results,
         empty_message,
         col_width_mode,
+        accent_color,
     )
 }
 
@@ -673,6 +685,7 @@ pub(crate) fn render_rows_single_line(
     state: &ScrollState,
     max_results: usize,
     empty_message: &str,
+    accent_color: Color,
 ) -> u16 {
     if rows_all.is_empty() {
         if area.height > 0 {
@@ -721,7 +734,7 @@ pub(crate) fn render_rows_single_line(
         let mut full_line = build_full_line(row, desc_col);
         if Some(i) == state.selected_idx && !row.is_disabled {
             full_line.spans.iter_mut().for_each(|span| {
-                span.style = Style::default().fg(Color::Cyan).bold();
+                span.style = Style::default().fg(accent_color).bold();
             });
         }
         if row.is_disabled {

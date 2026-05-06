@@ -107,6 +107,8 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
 
     let mut loop_state = InteractiveLoopState::default();
 
+    let initial_theme_name = crate::onboarding::load_theme_selection();
+
     // Create the root chat widget that owns visible TUI state and input handling.
     let mut chat_widget = ChatWidget::new_with_app_event(ChatWidgetInit {
         frame_requester: tui.frame_requester(),
@@ -125,6 +127,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         saved_model_slugs,
         show_model_onboarding: config.show_model_onboarding,
         startup_tooltip_override: Some(format!("Ready in {}", cwd.display())),
+        initial_theme_name,
     });
     tui.set_exit_layout_snapshot_handle(chat_widget.exit_layout_snapshot_handle());
 
@@ -284,8 +287,20 @@ fn handle_tui_event(
                 return Ok(LoopAction::Continue);
             }
 
+            if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if tui.is_alt_screen_active() {
+                    tui.leave_alt_screen()?;
+                } else {
+                    tui.enter_alt_screen()?;
+                }
+                return Ok(LoopAction::Continue);
+            }
+
             loop_state.last_ctrl_c_at = None;
             chat_widget.handle_key_event(key);
+        }
+        TuiEvent::Mouse(mouse_event) => {
+            chat_widget.handle_mouse_event(mouse_event);
         }
         TuiEvent::Paste(pasted) => {
             // Many terminals convert newlines to \r when pasting (e.g., iTerm2),

@@ -47,6 +47,7 @@ fn widget_with_model_and_thinking(
         saved_model_slugs: Vec::new(),
         show_model_onboarding: false,
         startup_tooltip_override: None,
+        initial_theme_name: None,
     });
     (widget, app_event_rx)
 }
@@ -68,6 +69,7 @@ fn onboarding_widget_with_model(
         saved_model_slugs: Vec::new(),
         show_model_onboarding: true,
         startup_tooltip_override: None,
+        initial_theme_name: None,
     });
     (widget, app_event_rx)
 }
@@ -966,6 +968,7 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
         saved_model_slugs: vec!["test-model".into(), "second-model".into()],
         show_model_onboarding: false,
         startup_tooltip_override: None,
+        initial_theme_name: None,
     });
 
     widget.handle_app_event(AppEvent::RunSlashCommand {
@@ -1085,6 +1088,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         saved_model_slugs: vec!["test-model".into(), "second-model".into()],
         show_model_onboarding: false,
         startup_tooltip_override: None,
+        initial_theme_name: None,
     });
 
     widget.handle_app_event(AppEvent::ModelSelected {
