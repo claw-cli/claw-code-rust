@@ -776,6 +776,7 @@ fn active_response_renders_generating_status_without_devo_title() {
     };
     let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
 
+    let _ = widget.drain_scrollback_lines(80);
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
         thinking: None,
@@ -797,6 +798,8 @@ fn streaming_pending_ai_reply_respects_wrap_limit_before_finalize() {
         ..Model::default()
     };
     let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    widget.handle_app_event(AppEvent::ClearTranscript);
+    let _ = widget.drain_scrollback_lines(80);
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
@@ -985,18 +988,18 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
         "thinking".to_string(),
     ));
     widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
-        "final answer".to_string(),
+        "final answer line 1\nfinal answer line 2\n".to_string(),
     ));
 
     let before_rows = rendered_rows(&widget, 80, 16);
     let before = before_rows.join("\n");
     assert!(
-        before.contains("thinking") && before.contains("final answer"),
+        before.contains("thinking") && before.contains("final answer line 1"),
         "reasoning/text should both be visible while streaming:\n{before}"
     );
     let reasoning_row = find_row_index(&before_rows, "thinking").expect("missing reasoning row");
     let assistant_row =
-        find_row_index(&before_rows, "final answer").expect("missing assistant row");
+        find_row_index(&before_rows, "final answer line 1").expect("missing assistant row");
     assert_eq!(
         assistant_row,
         reasoning_row + 2,
@@ -1008,14 +1011,34 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
         before_rows[reasoning_row + 1]
     );
 
+    widget.pre_draw_tick();
+    let committed_before_reasoning_complete =
+        trim_trailing_blank_scrollback_lines(widget.drain_scrollback_lines(80));
+    assert!(
+        !scrollback_contains_text(&committed_before_reasoning_complete, "final answer line 1"),
+        "assistant output should stay live until reasoning completes"
+    );
+
     widget.handle_worker_event(crate::events::WorkerEvent::ReasoningCompleted(
         "thinking".to_string(),
     ));
 
     let after = rendered_rows(&widget, 80, 16).join("\n");
     assert!(
-        after.contains("thinking") && after.contains("final answer"),
-        "reasoning/text should remain visible in separate cells:\n{after}"
+        after.contains("thinking"),
+        "reasoning text should remain visible after completion:\n{after}"
+    );
+
+    let committed_after_reasoning_complete =
+        trim_trailing_blank_scrollback_lines(widget.drain_scrollback_lines(80));
+    let committed_after_text = committed_after_reasoning_complete
+        .iter()
+        .flat_map(|line| line.line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(
+        committed_after_text.contains("final answer line 1"),
+        "assistant output should flush once reasoning completes: {committed_after_reasoning_complete:?}"
     );
 }
 

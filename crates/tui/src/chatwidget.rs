@@ -240,6 +240,7 @@ pub(crate) struct ChatWidget {
     active_reasoning_cell: Option<history_cell::AgentMessageCell>,
     stream_controller: Option<StreamController>,
     stream_chunking_policy: AdaptiveChunkingPolicy,
+    reasoning_stream_active: bool,
     available_models: Vec<Model>,
     saved_model_slugs: Vec<String>,
     onboarding_step: Option<OnboardingStep>,
@@ -700,6 +701,7 @@ impl ChatWidget {
             active_reasoning_cell: None,
             stream_controller: None,
             stream_chunking_policy: AdaptiveChunkingPolicy::default(),
+            reasoning_stream_active: false,
             available_models,
             saved_model_slugs,
             onboarding_step: None,
@@ -1114,6 +1116,7 @@ impl ChatWidget {
                 self.active_reasoning_cell = None;
                 self.stream_controller = Some(StreamController::new(None, &self.session.cwd));
                 self.stream_chunking_policy.reset();
+                self.reasoning_stream_active = false;
                 self.bottom_pane.set_task_running(true);
             }
             WorkerEvent::TextDelta(text) => {
@@ -1121,6 +1124,7 @@ impl ChatWidget {
                 self.set_status_message("Generating");
             }
             WorkerEvent::ReasoningDelta(text) => {
+                self.reasoning_stream_active = true;
                 self.active_reasoning_text.push_str(&text);
                 self.sync_active_reasoning_cell();
                 self.set_status_message("Thinking");
@@ -1137,6 +1141,8 @@ impl ChatWidget {
                     self.active_reasoning_text = text;
                 }
                 self.sync_active_reasoning_cell();
+                self.reasoning_stream_active = false;
+                self.flush_stream_commit_ticks();
                 self.set_status_message("Thinking");
             }
             WorkerEvent::ToolCall {
@@ -1373,6 +1379,7 @@ impl ChatWidget {
                 self.active_reasoning_cell = None;
                 self.stream_controller = None;
                 self.stream_chunking_policy.reset();
+                self.reasoning_stream_active = false;
                 self.history.clear();
                 self.next_history_flush_index = 0;
                 self.busy = false;
@@ -1417,6 +1424,7 @@ impl ChatWidget {
                 self.active_reasoning_cell = None;
                 self.stream_controller = None;
                 self.stream_chunking_policy.reset();
+                self.reasoning_stream_active = false;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
                 self.total_cache_read_tokens = total_cache_read_tokens;
@@ -1556,6 +1564,7 @@ impl ChatWidget {
                 self.active_reasoning_cell = None;
                 self.stream_controller = None;
                 self.stream_chunking_policy.reset();
+                self.reasoning_stream_active = false;
                 self.set_status_message("Transcript cleared");
             }
             SlashCommand::Onboard => {
@@ -1936,6 +1945,7 @@ impl ChatWidget {
         let reasoning_text = std::mem::take(&mut self.active_reasoning_text);
         self.active_reasoning_cell = None;
         self.active_assistant_cell = None;
+        self.reasoning_stream_active = false;
         if !reasoning_text.trim().is_empty() {
             self.add_markdown_history_with_status("Reasoning", &reasoning_text, status);
         }
@@ -2004,6 +2014,38 @@ impl ChatWidget {
     }
 
     fn run_stream_commit_tick(&mut self) {
+        if self.reasoning_stream_active {
+            return;
+        }
+        self.drain_stream_commit_tick(true);
+    }
+
+    fn flush_stream_commit_ticks(&mut self) {
+        if self.reasoning_stream_active {
+            return;
+        }
+        let mut safety = 0usize;
+        while self.stream_controller.is_some() && safety < 256 {
+            let queued_before = self
+                .stream_controller
+                .as_ref()
+                .map_or(0, |controller| controller.queued_lines());
+            if queued_before == 0 {
+                break;
+            }
+            self.drain_stream_commit_tick(false);
+            let queued_after = self
+                .stream_controller
+                .as_ref()
+                .map_or(0, |controller| controller.queued_lines());
+            if queued_after >= queued_before {
+                break;
+            }
+            safety += 1;
+        }
+    }
+
+    fn drain_stream_commit_tick(&mut self, schedule_followup: bool) {
         let now = Instant::now();
         let output = run_commit_tick(
             &mut self.stream_chunking_policy,
@@ -2020,7 +2062,7 @@ impl ChatWidget {
             self.frame_requester.schedule_frame();
         }
 
-        if self.stream_controller.is_some() && !output.all_idle {
+        if schedule_followup && self.stream_controller.is_some() && !output.all_idle {
             self.frame_requester
                 .schedule_frame_in(Duration::from_millis(16));
         }
