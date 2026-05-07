@@ -1491,3 +1491,139 @@ fn model_selection_without_thinking_support_finishes_immediately() {
         })
     );
 }
+
+#[test]
+fn flushed_assistant_lines_after_reasoning_are_in_one_cell() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    // Activate reasoning pause
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
+        "thinking".to_string(),
+    ));
+    // Queue assistant lines while reasoning is active
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "line one\nline two\nline three\n".to_string(),
+    ));
+    // Complete reasoning — this triggers the flush
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningCompleted(
+        "thinking".to_string(),
+    ));
+
+    let committed = widget.drain_scrollback_lines(80);
+    // The three assistant lines should be in a single cell, so there should be
+    // no blank separator lines between them. Expect exactly 3 non-blank content
+    // lines (plus possibly a blank separator between header and this cell).
+    let non_blank: Vec<&crate::history_cell::ScrollbackLine> = committed
+        .iter()
+        .filter(|l| {
+            !l.line
+                .spans
+                .iter()
+                .all(|span| span.content.trim().is_empty())
+        })
+        .collect();
+    let text = non_blank
+        .iter()
+        .flat_map(|l| l.line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("line one"));
+    assert!(text.contains("line two"));
+    assert!(text.contains("line three"));
+}
+
+#[test]
+fn reasoning_appears_exactly_once_after_full_turn() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    let _ = widget.drain_scrollback_lines(80);
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
+        "I am a unique thought".to_string(),
+    ));
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "final answer\n".to_string(),
+    ));
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningCompleted(
+        "I am a unique thought".to_string(),
+    ));
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "stop".to_string(),
+        turn_count: 1,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+    });
+
+    let scrollback = widget.drain_scrollback_lines(80);
+    let full_text = scrollback
+        .iter()
+        .flat_map(|line| line.line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(
+        full_text.matches("I am a unique thought").count(),
+        1,
+        "reasoning should appear exactly once in scrollback, got:\n{full_text}"
+    );
+}
+
+#[test]
+fn live_reasoning_cell_renders_without_duplication() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
+        "step by step analysis".to_string(),
+    ));
+
+    let rows = rendered_rows(&widget, 80, 12);
+    let before = rows.join("\n");
+    // Reasoning text should be visible and appear exactly once.
+    assert!(
+        before.contains("step by step analysis"),
+        "reasoning text should be visible:\n{before}"
+    );
+    let occurrences = before.matches("step by step analysis").count();
+    assert_eq!(
+        occurrences, 1,
+        "reasoning should appear exactly once, got {occurrences}:\n{before}"
+    );
+}

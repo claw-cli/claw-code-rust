@@ -2024,24 +2024,19 @@ impl ChatWidget {
         if self.reasoning_stream_active {
             return;
         }
-        let mut safety = 0usize;
-        while self.stream_controller.is_some() && safety < 256 {
-            let queued_before = self
-                .stream_controller
-                .as_ref()
-                .map_or(0, |controller| controller.queued_lines());
-            if queued_before == 0 {
-                break;
+        if let Some(controller) = self.stream_controller.as_mut() {
+            let queue_len = controller.queued_lines();
+            if queue_len == 0 {
+                return;
             }
-            self.drain_stream_commit_tick(false);
-            let queued_after = self
-                .stream_controller
-                .as_ref()
-                .map_or(0, |controller| controller.queued_lines());
-            if queued_after >= queued_before {
-                break;
+            // Drain all queued lines in one batch so they become a single
+            // history cell rather than multiple cells separated by blank rows.
+            let (cell, _idle) = controller.on_commit_tick_batch(queue_len);
+            if let Some(cell) = cell {
+                self.add_history_entry_without_redraw(cell);
+                self.sync_active_assistant_cell();
+                self.frame_requester.schedule_frame();
             }
-            safety += 1;
         }
     }
 
