@@ -64,12 +64,70 @@ enum LoopAction {
     ClearAndExit,
 }
 
+/// RAII guard that restores terminal modes exactly once after the TUI loop ends.
+///
+/// The restore is owned by the outer host instead of `Tui::drop()`:
+///
+/// ```text
+/// app loop exits
+///    |
+///    v
+/// clear live TUI area
+///    |
+///    v
+/// drop Tui wrapper
+///    |
+///    v
+/// restore terminal modes once
+///    |
+///    v
+/// shell prints the next prompt
+/// ```
+///
+/// This avoids the older pattern where the `Tui` drop path emitted extra terminal
+/// control sequences after the clear, which could cause prompt drift in Terminal.app.
+struct TerminalRestoreGuard {
+    active: bool,
+}
+
+impl TerminalRestoreGuard {
+    fn new() -> Self {
+        Self { active: true }
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if self.active {
+            crate::tui::restore()?;
+            self.active = false;
+        }
+        Ok(())
+    }
+
+    fn restore_silently(&mut self) {
+        if self.active {
+            if let Err(err) = crate::tui::restore() {
+                eprintln!(
+                    "failed to restore terminal. Run `reset` or restart your terminal to recover: {err}"
+                );
+            }
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        self.restore_silently();
+    }
+}
+
 /// Runs the interactive terminal UI until the user exits or the worker stops.
 pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit> {
     // Build the initial terminal, session, and background worker state.
     let initial_session = config.initial_session.clone();
     let terminal = crate::tui::init()?;
     let mut tui = crate::tui::Tui::new(terminal);
+    let mut terminal_restore_guard = TerminalRestoreGuard::new();
 
     // spawn a worker with stdio transport with server, it'll emit events
     // such as `[WorkerEvent::TurnStarted]`, `[WorkerEvent::UsageUpdated]` etc.
@@ -129,8 +187,6 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         startup_tooltip_override: Some(format!("Ready in {}", cwd.display())),
         initial_theme_name,
     });
-    tui.set_exit_layout_snapshot_handle(chat_widget.exit_layout_snapshot_handle());
-
     // tui events, such as `[TuiEvent::Draw]`, `[TuiEvent::Key]`, `TuiEvent::Paste`
     let events = tui.event_stream();
     tokio::pin!(events);
@@ -191,6 +247,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
 
     // Tear down the terminal wrapper before awaiting worker shutdown.
     drop(tui);
+    terminal_restore_guard.restore()?;
     worker.shutdown().await?;
     Ok(AppExit {
         turn_count: loop_state.turn_count,
@@ -215,7 +272,7 @@ fn resolve_initial_model(
 }
 
 fn clear_before_exit(tui: &mut Tui) -> Result<()> {
-    Ok(tui.shutdown_inline_precise()?)
+    Ok(tui.shutdown_terminal_safe()?)
 }
 
 fn handle_tui_event(
